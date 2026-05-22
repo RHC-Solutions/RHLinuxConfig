@@ -861,7 +861,159 @@ CRON
     fi
 }
 
-# ── 13. Firewall + Fail2Ban + AbuseIPDB ────────────────────────────────────
+# ── 13. Cloudflare DNS Integration ─────────────────────────────────────────
+setup_cloudflare() {
+    header "Cloudflare DNS (Dynamic DNS) Setup"
+    echo "Keep your DNS A record pointed at this server's IP address."
+    echo "You need:"
+    echo "  1. An API Token with DNS:Edit permission for the zone"
+    echo "     → Create at https://dash.cloudflare.com/profile/api-tokens"
+    echo "  2. The Zone ID (found in Cloudflare Dashboard → zone → Overview)"
+    echo "  3. The DNS record name to update (e.g. server.example.com)"
+    echo
+
+    local ans
+    prompt "Set up Cloudflare DNS updates? [y/N]: " ans
+    [[ ! "$ans" =~ ^[Yy] ]] && { log "Skipping Cloudflare."; return; }
+
+    local cf_token cf_zone cf_name cf_ttl cf_proxied
+    while true; do
+        prompt "Cloudflare API Token : " cf_token
+        [[ -n "$cf_token" ]] && break
+        warn "API Token cannot be empty."
+    done
+    while true; do
+        prompt "Zone ID             : " cf_zone
+        [[ -n "$cf_zone" ]] && break
+        warn "Zone ID cannot be empty."
+    done
+    while true; do
+        prompt "DNS Record Name     : " cf_name
+        local fqdn="${cf_name:-}"
+        # If just a hostname, append zone-derived domain
+        [[ -n "$fqdn" ]] && break
+        warn "Record name cannot be empty."
+    done
+    prompt "TTL (120-86400s)    [120]: " cf_ttl
+    cf_ttl="${cf_ttl:-120}"
+    prompt "Proxied (CDN)       [Y/n]: " ans
+    cf_proxied=true
+    [[ "$ans" =~ ^[Nn] ]] && cf_proxied=false
+
+    echo
+    info "Testing Cloudflare API token..."
+    local test_ok
+    test_ok=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('success',''))" 2>/dev/null || echo "")
+    if [[ "$test_ok" != "True" ]]; then
+        warn "API token verification failed. Check token permissions."
+        prompt "Continue anyway? [y/N]: " ans
+        [[ ! "$ans" =~ ^[Yy] ]] && { warn "Skipping Cloudflare."; return; }
+    fi
+
+    # Save credentials
+    cat > /etc/profile.d/cloudflare.sh <<EOF
+export CF_TOKEN=$cf_token
+export CF_ZONE=$cf_zone
+export CF_NAME=$cf_name
+export CF_TTL=$cf_ttl
+export CF_PROXIED=$cf_proxied
+EOF
+    chmod +x /etc/profile.d/cloudflare.sh
+
+    # Create DNS update script
+    local cf_script="/usr/local/bin/cloudflare-dns"
+    cat > "$cf_script" <<'CFSCRIPT'
+#!/usr/bin/env bash
+#===============================================================================
+# Cloudflare DNS Update — sets DNS A record to current public IP
+# Usage: cloudflare-dns [--ip <address>]
+#===============================================================================
+set -euo pipefail
+
+TOKEN="${CF_TOKEN:?CF_TOKEN not set}"
+ZONE="${CF_ZONE:?CF_ZONE not set}"
+NAME="${CF_NAME:?CF_NAME not set}"
+TTL="${CF_TTL:-120}"
+PROXIED="${CF_PROXIED:-true}"
+API="https://api.cloudflare.com/client/v4"
+
+cf_api() {
+    curl -s -X "$1" "$2" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "Content-Type: application/json" "${@:3}"
+}
+
+# Get current public IP
+if [[ "${1:-}" == "--ip" && -n "${2:-}" ]]; then
+    IP="$2"
+else
+    IP=$(curl -s4 ifconfig.me 2>/dev/null || curl -s4 icanhazip.com 2>/dev/null)
+fi
+[[ -z "$IP" ]] && { echo "Could not determine public IP."; exit 1; }
+
+echo "Updating $NAME → $IP (TTL=$TTL, proxied=$PROXIED)"
+
+# Get existing record ID
+RECORD_ID=$(cf_api GET "$API/zones/$ZONE/dns_records?type=A&name=$NAME" \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+records = d.get('result', [])
+if records:
+    print(records[0]['id'])
+else:
+    print('')
+" 2>/dev/null)
+
+if [[ -n "$RECORD_ID" ]]; then
+    # Update existing
+    RESULT=$(cf_api PUT "$API/zones/$ZONE/dns_records/$RECORD_ID" \
+        -d "{\"type\":\"A\",\"name\":\"$NAME\",\"content\":\"$IP\",\"ttl\":$TTL,\"proxied\":$PROXIED}")
+else
+    # Create new
+    RESULT=$(cf_api POST "$API/zones/$ZONE/dns_records" \
+        -d "{\"type\":\"A\",\"name\":\"$NAME\",\"content\":\"$IP\",\"ttl\":$TTL,\"proxied\":$PROXIED}")
+fi
+
+SUCCESS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',''))" 2>/dev/null)
+if [[ "$SUCCESS" == "True" ]]; then
+    echo "✓ DNS record updated: $NAME → $IP"
+else
+    echo "✗ Update failed:"
+    echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
+    exit 1
+fi
+CFSCRIPT
+    chmod +x "$cf_script"
+    log "cloudflare-dns script installed at $cf_script"
+
+    # Initial run
+    info "Running initial DNS update..."
+    "$cf_script" && {
+        log "Cloudflare DNS record updated to current IP."
+    } || warn "Initial DNS update failed — check credentials."
+
+    # Cron for periodic updates
+    echo
+    prompt "Set up hourly cron job to keep DNS record updated? [Y/n]: " ans
+    if [[ "${ans:-y}" =~ ^[Yy] ]]; then
+        cat > /etc/cron.hourly/cloudflare-dns <<'CRON'
+#!/bin/bash
+source /etc/profile.d/cloudflare.sh 2>/dev/null || true
+exec /usr/local/bin/cloudflare-dns 2>/dev/null
+CRON
+        chmod +x /etc/cron.hourly/cloudflare-dns
+        log "Hourly cron job installed at /etc/cron.hourly/cloudflare-dns"
+    fi
+
+    echo "  Usage: cloudflare-dns                  # auto-detect IP"
+    echo "         cloudflare-dns --ip 1.2.3.4      # specify IP manually"
+}
+
+# ── 14. Firewall + Fail2Ban + AbuseIPDB ────────────────────────────────────
 setup_firewall() {
     header "Firewall Setup ($FW_TOOL)"
 
@@ -980,7 +1132,9 @@ show_summary() {
     info "Local IP     : $(ip -4 addr show | awk '/inet/{print $2}' | grep -v 127.0.0.1 | cut -d/ -f1 | head -1)"
     info "OS           : $OS_ID $OS_VERSION_ID ($OS_FAMILY)"
     echo
-    info "Installed packages, tools, and security hardening."
+    info "Installed: base tools + latest Node/Git/Python + opencode + claude-code"
+    info "Security : firewall ($FW_TOOL) + fail2ban + root lockdown + odin user"
+    info "Cloud    : telegram + wasabi + cloudflare-dns (if configured)"
     echo
     log "Reboot recommended to apply all updates."
     echo
@@ -1047,6 +1201,7 @@ wizard_odin_user
 setup_telegram
 setup_wasabi
 setup_wasabi_autobackup
+setup_cloudflare
 setup_firewall
 setup_fail2ban
 post_notify
