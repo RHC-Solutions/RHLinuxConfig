@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #===============================================================================
 # RHLinuxConfig — Universal Linux Setup & Hardening Wizard
+# Supports: AlmaLinux, Rocky, CentOS, Debian, Ubuntu, Arch, Mint
 # - System info, updates, tools, Node/Git/Python, opencode, claude-code
-# - Telegram alerts, Wasabi backup, UFW + Fail2Ban + AbuseIPDB
+# - Telegram alerts, Wasabi backup, UFW/Firewalld + Fail2Ban + AbuseIPDB
 # - Static IP, root password/disable, odin user creation
 #===============================================================================
 set -euo pipefail
@@ -22,6 +23,174 @@ prompt(){
 
 # ── Root check ──────────────────────────────────────────────────────────────
 [[ $EUID -ne 0 ]] && { err "Must run as root."; exit 1; }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DISTRO DETECTION
+# ═════════════════════════════════════════════════════════════════════════════
+detect_distro() {
+    [[ -f /etc/os-release ]] && . /etc/os-release || { err "Cannot detect OS."; exit 1; }
+    OS_ID="${ID,,}"
+    OS_VERSION_ID="${VERSION_ID:-0}"
+    OS_FAMILY=""
+
+    case "$OS_ID" in
+        ubuntu|debian|mint|linuxmint)
+            OS_FAMILY="debian" ;;
+        almalinux|rocky|centos|rhel|ol|fedora)
+            OS_FAMILY="rhel" ;;
+        arch|manjaro|endeavouros|garuda)
+            OS_FAMILY="arch" ;;
+        opensuse*|suse)
+            OS_FAMILY="suse" ;;
+        *)
+            # Try fallback via ID_LIKE
+            case "${ID_LIKE,,}" in
+                *debian*) OS_FAMILY="debian"; OS_ID="$OS_ID (deb-based)" ;;
+                *rhel*|*fedora*) OS_FAMILY="rhel"; OS_ID="$OS_ID (rpm-based)" ;;
+                *arch*) OS_FAMILY="arch"; OS_ID="$OS_ID (arch-based)" ;;
+                *) err "Unsupported OS: $OS_ID (ID_LIKE=$ID_LIKE)"; exit 1 ;;
+            esac ;;
+    esac
+
+    case "$OS_FAMILY" in
+        debian)
+            PKG_MGR="apt"
+            PKG_INSTALL="apt-get install -y -qq"
+            PKG_INSTALL_NQ="apt-get install -y"    # non-quiet for interactive
+            PKG_UPDATE="apt-get update -qq"
+            PKG_UPGRADE="apt-get full-upgrade -y -qq"
+            PKG_AUTOREMOVE="apt-get autoremove -y -qq; apt-get autoclean -qq"
+            PKG_CHECK="dpkg -s"
+            PKG_SEARCH="apt-cache search"
+            PKG_REPO_ADD="add-apt-repository -y"
+            NETPLAN_BIN="netplan"
+            FW_TOOL="ufw"
+            FIREWALL_PKG="ufw"
+            SENSORS_PKG="lm-sensors"
+            DEV_GROUP="sudo"
+            ;;
+        rhel)
+            PKG_MGR="dnf"
+            PKG_INSTALL="dnf install -y -q"
+            PKG_INSTALL_NQ="dnf install -y"
+            PKG_UPDATE="dnf check-update -q || true"
+            PKG_UPGRADE="dnf upgrade -y -q"
+            PKG_AUTOREMOVE="dnf autoremove -y -q"
+            PKG_CHECK="rpm -q"
+            PKG_SEARCH="dnf search"
+            # EPEL first
+            PKG_REPO_ADD="dnf config-manager --set-enabled"
+            NETPLAN_BIN=""
+            FIREWALL_PKG="firewalld"
+            FW_TOOL="firewalld"
+            SENSORS_PKG="lm_sensors"
+            DEV_GROUP="wheel"
+            ;;
+        arch)
+            PKG_MGR="pacman"
+            PKG_INSTALL="pacman -S --noconfirm --needed"
+            PKG_INSTALL_NQ="pacman -S --noconfirm"
+            PKG_UPDATE="pacman -Sy"
+            PKG_UPGRADE="pacman -Syu --noconfirm"
+            PKG_AUTOREMOVE="pacman -Rns --noconfirm \$(pacman -Qdtq 2>/dev/null) 2>/dev/null || true"
+            PKG_CHECK="pacman -Q"
+            PKG_SEARCH="pacman -Ss"
+            PKG_REPO_ADD=""
+            NETPLAN_BIN=""
+            FW_TOOL="ufw"
+            FIREWALL_PKG="ufw"
+            SENSORS_PKG="lm_sensors"
+            DEV_GROUP="wheel"
+            ;;
+        suse)
+            PKG_MGR="zypper"
+            PKG_INSTALL="zypper install -y"
+            PKG_INSTALL_NQ="zypper install -y"
+            PKG_UPDATE="zypper refresh"
+            PKG_UPGRADE="zypper update -y"
+            PKG_AUTOREMOVE="zypper rm -u"
+            PKG_CHECK="rpm -q"
+            PKG_SEARCH="zypper search"
+            PKG_REPO_ADD="zypper addrepo"
+            NETPLAN_BIN=""
+            FW_TOOL="firewalld"
+            FIREWALL_PKG="firewalld"
+            SENSORS_PKG="lm_sensors"
+            DEV_GROUP="wheel"
+            ;;
+    esac
+
+    # Arch doesn't use version codenames
+    OS_CODENAME="${VERSION_CODENAME:-}"
+    ARCH=$(uname -m)
+
+    header "Detected System"
+    info "Distribution : $OS_ID $OS_VERSION_ID ($OS_FAMILY family)"
+    info "Architecture : $ARCH"
+    info "Package mgr  : $PKG_MGR"
+    echo
+}
+
+# ── Distro-specific package maps ────────────────────────────────────────────
+PACKAGES_CORE="curl wget htop mc ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr-tiny screen tmux unzip zip gpg jq tree rsync"
+
+# Packages that differ by family (set after detect_distro)
+PACKAGES_EXTRA=""
+enable_epel() {
+    [[ "$OS_FAMILY" != "rhel" ]] && return
+    # Enable EPEL if not already
+    if ! rpm -q epel-release &>/dev/null; then
+        if [[ "$OS_ID" == "almalinux" ]]; then
+            $PKG_INSTALL almalinux-release-epel 2>/dev/null || true
+        elif [[ "$OS_ID" == "rocky" ]]; then
+            $PKG_INSTALL epel-release 2>/dev/null || true
+        elif [[ "$OS_ID" == "centos" ]]; then
+            $PKG_INSTALL epel-release 2>/dev/null || true
+        else
+            $PKG_INSTALL epel-release 2>/dev/null || true
+        fi
+    fi
+    # Enable CRB / PowerTools for additional packages
+    dnf config-manager --set-enabled crb 2>/dev/null || \
+        dnf config-manager --set-enabled powertools 2>/dev/null || true
+}
+
+resolve_pkg_list() {
+    local pkgs="$PACKAGES_CORE"
+    case "$OS_FAMILY" in
+        debian)
+            pkgs="$pkgs software-properties-common apt-transport-https ca-certificates build-essential"
+            # netplan only on Ubuntu
+            [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]] && pkgs="$pkgs netplan.io"
+            pkgs="$pkgs $SENSORS_PKG $FIREWALL_PKG fail2ban"
+            ;;
+        rhel)
+            enable_epel
+            pkgs="$pkgs ca-certificates gcc gcc-c++ make epel-release"
+            # NetworkManager ifcfg on older RHEL
+            pkgs="$pkgs $SENSORS_PKG fail2ban"
+            # firewalld is usually preinstalled
+            rpm -q firewalld &>/dev/null || pkgs="$pkgs firewalld"
+            # Add dnf-utils for config-manager
+            pkgs="$pkgs dnf-plugins-core"
+            # iftop/iotop/nethogs need epel
+            ;;
+        arch)
+            pkgs="$pkgs ca-certificates base-devel $SENSORS_PKG $FIREWALL_PKG fail2ban"
+            # mtr-tiny is just mtr on arch
+            pkgs="${pkgs/mtr-tiny/mtr}"
+            ;;
+        suse)
+            pkgs="$pkgs ca-certificates patterns-devel-base-devel $SENSORS_PKG $FIREWALL_PKG fail2ban"
+            pkgs="${pkgs/mtr-tiny/mtr}"
+            ;;
+    esac
+    PACKAGES_EXTRA="$pkgs"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DISTRO-ADAPTED FUNCTIONS
+# ═════════════════════════════════════════════════════════════════════════════
 
 # ── Helper: generate random password ────────────────────────────────────────
 gen_pass() {
@@ -57,41 +226,61 @@ show_info() {
 # ── 2. Full Update & Upgrade ────────────────────────────────────────────────
 do_update() {
     header "System Update"
-    apt-get update -qq
-    apt-get full-upgrade -y -qq
-    apt-get autoremove -y -qq
-    apt-get autoclean -qq
+    info "Using $PKG_MGR — updating package lists..."
+    eval "$PKG_UPDATE"
+    info "Upgrading packages..."
+    eval "$PKG_UPGRADE"
+    eval "$PKG_AUTOREMOVE" 2>/dev/null || true
     log "System is up to date."
 }
 
 # ── 3. Install Base Tools ───────────────────────────────────────────────────
-PACKAGES=(
-    curl wget htop mc ncdu
-    btop iftop iotop nethogs net-tools
-    lm-sensors smartmontools
-    sysstat dstat
-    iperf3 mtr-tiny
-    screen tmux
-    unzip zip gpg
-    jq tree
-    software-properties-common apt-transport-https ca-certificates
-    rsync build-essential netplan.io
-)
+pkg_install() {
+    local pkgs=("$@")
+    case "$OS_FAMILY" in
+        debian)
+            local missing=()
+            for pkg in "${pkgs[@]}"; do
+                $PKG_CHECK "$pkg" &>/dev/null || missing+=("$pkg")
+            done
+            [[ ${#missing[@]} -eq 0 ]] && return 0
+            $PKG_INSTALL "${missing[@]}" ;;
+        rhel)
+            local missing=()
+            for pkg in "${pkgs[@]}"; do
+                $PKG_CHECK "$pkg" &>/dev/null 2>&1 || missing+=("$pkg")
+            done
+            [[ ${#missing[@]} -eq 0 ]] && return 0
+            $PKG_INSTALL "${missing[@]}" 2>&1 | tail -3 || true
+            # Retry once for EPEL packages that might need enabling
+            local retry=()
+            for pkg in "${missing[@]}"; do
+                $PKG_CHECK "$pkg" &>/dev/null 2>&1 || retry+=("$pkg")
+            done
+            [[ ${#retry[@]} -gt 0 ]] && $PKG_INSTALL "${retry[@]}" 2>&1 | tail -3 || true
+            ;;
+        arch)
+            $PKG_INSTALL "${pkgs[@]}" 2>&1 | tail -3 || true ;;
+        suse)
+            $PKG_INSTALL "${pkgs[@]}" 2>&1 | tail -3 || true ;;
+    esac
+}
 
 do_install() {
     header "Installing Base Tools"
-    local missing=()
-    for pkg in "${PACKAGES[@]}"; do
-        dpkg -s "$pkg" &>/dev/null || missing+=("$pkg")
-    done
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        log "All packages already installed."
-    else
-        apt-get install -y -qq "${missing[@]}"
-        log "Packages installed."
-    fi
+    resolve_pkg_list
+    info "Packages: $PACKAGES_EXTRA"
+    # shellcheck disable=SC2086
+    pkg_install $PACKAGES_EXTRA
+    log "Base tools installed."
+
+    # Enable sysstat collection
     if [[ -f /etc/default/sysstat ]]; then
-        sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat
+        sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat 2>/dev/null || true
+        systemctl enable --now sysstat 2>/dev/null || true
+    fi
+    # RHEL: sysstat may use different config
+    if [[ -f /etc/sysconfig/sysstat ]]; then
         systemctl enable --now sysstat 2>/dev/null || true
     fi
 }
@@ -100,55 +289,85 @@ do_install() {
 do_install_latest() {
     header "Installing Latest: Node.js, Git, Python"
 
-    if ! command -v git &>/dev/null || [[ "$(git --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+')" < "2.40" ]]; then
-        info "Installing latest Git from PPA..."
-        add-apt-repository -y ppa:git-core/ppa -u &>/dev/null || true
-        apt-get install -y -qq git
+    # Git — latest via package manager or PPA
+    if ! command -v git &>/dev/null; then
+        pkg_install git
         log "Git $(git --version 2>/dev/null) installed."
-    else
-        log "Git already up to date: $(git --version 2>/dev/null)"
+    elif [[ "$OS_FAMILY" == "debian" ]]; then
+        local git_ver
+        git_ver=$(git --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
+        if [[ -n "$git_ver" && $(echo "$git_ver" | cut -d. -f1) -lt 2 ]]; then
+            info "Upgrading Git via PPA..."
+            add-apt-repository -y ppa:git-core/ppa -u &>/dev/null || true
+            $PKG_INSTALL git
+            log "Git $(git --version 2>/dev/null) installed."
+        fi
     fi
 
+    # Node.js — latest LTS via NodeSource (works on all major distros)
     if ! command -v node &>/dev/null; then
-        info "Installing latest Node.js LTS..."
-        curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-        apt-get install -y -qq nodejs
-        log "Node.js $(node --version) / npm $(npm --version) installed."
+        info "Installing latest Node.js LTS via NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - 2>/dev/null || \
+            curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash - 2>/dev/null || {
+            warn "NodeSource setup failed — trying distro package."
+            pkg_install nodejs || true
+        }
+        case "$OS_FAMILY" in
+            debian) $PKG_INSTALL nodejs 2>&1 | tail -1 ;;
+            rhel)   $PKG_INSTALL nodejs 2>&1 | tail -1 ;;
+            arch)   pkg_install nodejs npm ;;
+            suse)   $PKG_INSTALL nodejs npm ;;
+        esac
+        command -v node &>/dev/null && log "Node.js $(node --version) / npm $(npm --version) installed."
     else
         log "Node.js already installed: $(node --version)"
     fi
 
+    # Python — latest available
     local py_ver
     py_ver=$(python3 --version 2>/dev/null | grep -oP '\d+\.\d+')
-    if [[ -z "$py_ver" || "$(echo "$py_ver" | cut -d. -f2)" -lt 12 ]]; then
-        info "Installing latest Python from deadsnakes..."
-        add-apt-repository -y ppa:deadsnakes/ppa -u &>/dev/null || true
-        local latest_py
-        latest_py=$(apt-cache search '^python3\.[0-9]+$' | sort -t. -k2 -rn | head -1 | awk '{print $1}')
-        if [[ -n "$latest_py" ]]; then
-            apt-get install -y -qq "$latest_py" python3-pip
-            log "Python $("$latest_py" --version 2>/dev/null) installed as $latest_py"
-            update-alternatives --install /usr/bin/python3 python3 "$(command -v "$latest_py")" 1 2>/dev/null || true
-        fi
-    else
-        log "Python already up to date: $(python3 --version 2>/dev/null)"
-    fi
+    case "$OS_FAMILY" in
+        debian)
+            if [[ -z "$py_ver" || "$(echo "$py_ver" | cut -d. -f2)" -lt 12 ]]; then
+                info "Installing latest Python from deadsnakes..."
+                add-apt-repository -y ppa:deadsnakes/ppa -u &>/dev/null || true
+                local latest_py
+                latest_py=$(apt-cache search '^python3\.[0-9]+$' 2>/dev/null | sort -t. -k2 -rn | head -1 | awk '{print $1}')
+                if [[ -n "$latest_py" ]]; then
+                    $PKG_INSTALL "$latest_py" python3-pip
+                    log "Python $("$latest_py" --version 2>/dev/null) installed as $latest_py"
+                    update-alternatives --install /usr/bin/python3 python3 "$(command -v "$latest_py")" 1 2>/dev/null || true
+                fi
+            else
+                log "Python $(python3 --version 2>/dev/null) — up to date."
+            fi ;;
+        rhel)
+            if [[ -z "$py_ver" || "$(echo "$py_ver" | cut -d. -f2)" -lt 12 ]]; then
+                info "Installing Python 3 from EPEL/CRB..."
+                pkg_install python3 python3-pip python3-devel || true
+                log "Python $(python3 --version 2>/dev/null) installed."
+            fi ;;
+        arch)
+            # Arch always has latest Python
+            pkg_install python python-pip || true
+            log "Python $(python3 --version 2>/dev/null) — up to date." ;;
+        suse)
+            pkg_install python3 python3-pip python3-devel || true
+            log "Python $(python3 --version 2>/dev/null) installed." ;;
+    esac
 }
 
 # ── 5. Install opencode ─────────────────────────────────────────────────────
 do_install_opencode() {
     header "Installing opencode"
-
     if command -v opencode &>/dev/null; then
         log "opencode already installed: $(opencode --version 2>/dev/null || echo 'present')"
         return
     fi
-
     if ! command -v npx &>/dev/null; then
         warn "npm/npx not found — skipping opencode."
         return
     fi
-
     info "Installing @opencode-ai/opencode globally via npm..."
     npm install -g @opencode-ai/opencode 2>&1 | tail -3 || {
         warn "opencode npm install failed — check network / npm permissions."
@@ -156,7 +375,6 @@ do_install_opencode() {
     }
     log "opencode installed: $(opencode --version 2>/dev/null || echo 'ok')"
 
-    # PATH config for all users
     cat > /etc/profile.d/opencode.sh <<'EOF'
 if [[ ":$PATH:" != *":/usr/local/share/npm-global/bin:"* ]]; then
     export PATH="/usr/local/share/npm-global/bin:$PATH"
@@ -166,8 +384,6 @@ if [[ ":$PATH:" != *":$HOME/.opencode/bin:"* ]]; then
 fi
 EOF
     chmod +x /etc/profile.d/opencode.sh
-
-    # Also add to root's bashrc
     if ! grep -q "opencode" /root/.bashrc 2>/dev/null; then
         echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> /root/.bashrc
     fi
@@ -177,24 +393,19 @@ EOF
 # ── 6. Install Claude Code ──────────────────────────────────────────────────
 do_install_claude() {
     header "Installing Claude Code"
-
     if command -v claude &>/dev/null; then
         log "Claude Code already installed: $(claude --version 2>/dev/null || echo 'present')"
         return
     fi
-
     if ! command -v npx &>/dev/null; then
         warn "npm/npx not found — skipping Claude Code."
         return
     fi
-
     info "Installing @anthropic-ai/claude-code globally via npm..."
     npm install -g @anthropic-ai/claude-code 2>&1 | tail -3 || {
         warn "Claude Code npm install failed — check network / npm permissions."
         return
     }
-
-    # Verify installation
     if command -v claude &>/dev/null; then
         log "Claude Code installed: $(claude --version 2>/dev/null || echo 'ok')"
     else
@@ -204,14 +415,12 @@ do_install_claude() {
         } || warn "Claude Code not available."
     fi
 
-    # PATH config
     cat > /etc/profile.d/claude-code.sh <<'EOF'
 if [[ ":$PATH:" != *":$HOME/.claude/bin:"* ]]; then
     export PATH="$HOME/.claude/bin:$PATH"
 fi
 EOF
     chmod +x /etc/profile.d/claude-code.sh
-
     if ! grep -q "claude" /root/.bashrc 2>/dev/null; then
         echo 'export PATH="$HOME/.claude/bin:$PATH"' >> /root/.bashrc
     fi
@@ -221,7 +430,7 @@ EOF
 # ── 7. WIZARD: Static IP ───────────────────────────────────────────────────
 wizard_static_ip() {
     header "Network Configuration (DHCP → Static IP)"
-    local iface current_ip current_gw dns
+    local iface current_ip current_gw
     iface=$(ip route | awk '/default/{print $5; exit}')
     current_ip=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet/{print $2}' | cut -d/ -f1)
     current_gw=$(ip route | awk "/default via.*$iface/"'{print $3}')
@@ -244,11 +453,15 @@ wizard_static_ip() {
     prompt "DNS Secondary    [1.0.0.1]: " dns2
     dns2="${dns2:-1.0.0.1}"
 
-    # Detect netplan vs interfaces
-    if ls /etc/netplan/*.yaml &>/dev/null 2>&1; then
-        local np_file
-        np_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
-        cat > "$np_file" <<NETPLAN
+    local mask_full
+    mask_full=$(python3 -c "import socket,struct; print(socket.inet_ntoa(struct.pack('!I', (0xffffffff << (32-$netmask)) & 0xffffffff)))" 2>/dev/null || echo "255.255.255.0")
+
+    case "$OS_FAMILY" in
+        debian)
+            if ls /etc/netplan/*.yaml &>/dev/null 2>&1; then
+                local np_file
+                np_file=$(ls /etc/netplan/*.yaml 2>/dev/null | head -1)
+                cat > "$np_file" <<NETPLAN
 network:
   version: 2
   renderer: networkd
@@ -261,29 +474,70 @@ network:
       nameservers:
         addresses: [$dns1, $dns2]
 NETPLAN
-        netplan apply 2>/dev/null || {
-            warn "netplan apply failed — manual review needed at $np_file"
-        }
-        log "Static IP configured via netplan."
-    elif [[ -f /etc/network/interfaces ]]; then
-        cat > /etc/network/interfaces <<IFACES
+                netplan apply 2>/dev/null || warn "netplan apply failed — review $np_file"
+                log "Static IP configured via netplan."
+            elif [[ -f /etc/network/interfaces ]]; then
+                cat > /etc/network/interfaces <<IFACES
 auto lo
 iface lo inet loopback
 
 auto $iface
 iface $iface inet static
     address $static_ip
-    netmask $(python3 -c "import socket,struct; print(socket.inet_ntoa(struct.pack('!I', (0xffffffff << (32-$netmask)) & 0xffffffff)))" 2>/dev/null || echo "255.255.255.0")
+    netmask $mask_full
     gateway $gateway
     dns-nameservers $dns1 $dns2
 IFACES
-        if systemctl is-active networking &>/dev/null; then
-            systemctl restart networking 2>/dev/null || true
-        fi
-        log "Static IP configured via /etc/network/interfaces."
-    else
-        warn "No netplan or interfaces file found — configure IP manually."
-    fi
+                systemctl restart networking 2>/dev/null || true
+                log "Static IP via /etc/network/interfaces."
+            else
+                warn "No netplan or interfaces — configure IP manually."
+            fi ;;
+        rhel)
+            local cfg_file="/etc/sysconfig/network-scripts/ifcfg-$iface"
+            cat > "$cfg_file" <<IFCFG
+DEVICE=$iface
+BOOTPROTO=static
+ONBOOT=yes
+IPADDR=$static_ip
+PREFIX=$netmask
+GATEWAY=$gateway
+DNS1=$dns1
+DNS2=$dns2
+IFCFG
+            if command -v nmcli &>/dev/null; then
+                nmcli connection reload 2>/dev/null || true
+                nmcli connection up "$iface" 2>/dev/null || nmcli connection up "System $iface" 2>/dev/null || true
+            fi
+            log "Static IP configured via ifcfg ($cfg_file)." ;;
+        arch)
+            # systemd-networkd configuration
+            local netdev_file="/etc/systemd/network/20-$iface.network"
+            cat > "$netdev_file" <<SYSDNET
+[Match]
+Name=$iface
+
+[Network]
+Address=${static_ip}/${netmask}
+Gateway=$gateway
+DNS=$dns1
+DNS=$dns2
+SYSDNET
+            systemctl enable --now systemd-networkd 2>/dev/null || true
+            systemctl restart systemd-networkd 2>/dev/null || true
+            log "Static IP configured via systemd-networkd ($netdev_file)." ;;
+        suse)
+            local cfg_file="/etc/sysconfig/network/ifcfg-$iface"
+            cat > "$cfg_file" <<IFCFG
+BOOTPROTO=static
+IPADDR=$static_ip/$netmask
+GATEWAY=$gateway
+DNS1=$dns1
+DNS2=$dns2
+IFCFG
+            systemctl restart network 2>/dev/null || true
+            log "Static IP configured via ifcfg ($cfg_file)." ;;
+    esac
 }
 
 # ── 8. WIZARD: Root password + disable root ────────────────────────────────
@@ -326,7 +580,6 @@ wizard_odin_user() {
         if [[ "$ans" =~ ^[Yy] ]]; then
             odin_pass=$(gen_pass)
             echo "odin:$odin_pass" | chpasswd
-            log "odin password reset."
             echo
             log "══════════════════════════════════════════════"
             log "  ${GREEN}odin${NC} user password: ${RED}$odin_pass${NC}"
@@ -338,16 +591,13 @@ wizard_odin_user() {
     info "Creating user 'odin' with root privileges..."
     odin_pass=$(gen_pass)
 
-    useradd -m -s /bin/bash -G sudo,adm odin 2>/dev/null || \
-        useradd -m -s /bin/bash odin && usermod -aG sudo,adm odin
+    useradd -m -s /bin/bash -G "$DEV_GROUP,adm" odin 2>/dev/null || \
+        useradd -m -s /bin/bash odin && usermod -aG "$DEV_GROUP,adm" odin
 
     echo "odin:$odin_pass" | chpasswd
-
-    # Passwordless sudo for odin
     echo "odin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/odin
     chmod 440 /etc/sudoers.d/odin
 
-    # Copy SSH authorized_keys if root has any
     if [[ -f /root/.ssh/authorized_keys ]]; then
         mkdir -p /home/odin/.ssh
         cp /root/.ssh/authorized_keys /home/odin/.ssh/
@@ -363,7 +613,7 @@ wizard_odin_user() {
     log "══════════════════════════════════════════════════"
     log "  ${GREEN}Username${NC}: odin"
     log "  ${GREEN}Password${NC}: ${RED}$odin_pass${NC}"
-    log "  ${GREEN}Groups ${NC}: sudo, adm"
+    log "  ${GREEN}Groups ${NC}: $DEV_GROUP, adm"
     log "  ${GREEN}SSH   ${NC}: keys copied from root if present"
     log "══════════════════════════════════════════════════"
     echo
@@ -397,12 +647,11 @@ setup_telegram() {
         warn "Chat ID cannot be empty."
     done
 
-    # Verify token works
     info "Testing Telegram connection..."
     local test_ok
     test_ok=$(curl -s "https://api.telegram.org/bot${tg_token}/getMe" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok',''))" 2>/dev/null || echo "")
     if [[ "$test_ok" != "True" ]]; then
-        warn "Bot token seems invalid (getMe failed). Check and re-enter."
+        warn "Bot token seems invalid (getMe failed)."
         prompt "Continue anyway? [y/N]: " ans
         [[ ! "$ans" =~ ^[Yy] ]] && { warn "Skipping Telegram."; return; }
     fi
@@ -425,13 +674,11 @@ SCRIPT
     sed -i "s|__TG_TOKEN__|$tg_token|; s|__TG_CHAT__|$tg_chat|" "$script"
     chmod +x "$script"
 
-    # Send a test message
-    telegram-notify info "Telegram notifications configured successfully on $(hostname)" || \
+    telegram-notify info "Telegram notifications configured on $(hostname)" || \
         warn "Test message failed — check CHAT_ID."
 
     log "telegram-notify installed at $script"
     echo "  Usage: telegram-notify info \"Server is running\""
-    echo "         telegram-notify alert \"CPU > 90%\""
 }
 
 # ── 11. Wasabi (S3) Integration (Wizard) ───────────────────────────────────
@@ -473,10 +720,12 @@ setup_wasabi() {
 
     if ! command -v aws &>/dev/null; then
         info "Installing AWS CLI..."
-        apt-get install -y -qq awscli 2>/dev/null || {
-            curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-            unzip -qq /tmp/awscliv2.zip -d /tmp && /tmp/aws/install
-        }
+        case "$OS_FAMILY" in
+            debian) $PKG_INSTALL awscli 2>/dev/null || install_awscli_v2 ;;
+            rhel)   $PKG_INSTALL awscli2 2>/dev/null || $PKG_INSTALL awscli 2>/dev/null || install_awscli_v2 ;;
+            arch)   pkg_install aws-cli || install_awscli_v2 ;;
+            suse)   $PKG_INSTALL aws-cli 2>/dev/null || install_awscli_v2 ;;
+        esac
     fi
 
     mkdir -p /root/.aws
@@ -492,29 +741,22 @@ aws_secret_access_key = $wasabi_secret
 EOF
     chmod 600 /root/.aws/credentials
 
-    # Export for use in helper scripts
     cat > /etc/profile.d/wasabi.sh <<EOF
 export WASABI_BUCKET=$wasabi_bucket
 export WASABI_REGION=$wasabi_region
 EOF
     chmod +x /etc/profile.d/wasabi.sh
 
-    # Test connection
     if aws s3 --endpoint-url "https://s3.${wasabi_region}.wasabisys.com" ls "s3://${wasabi_bucket}" &>/dev/null; then
         log "Wasabi connection OK — bucket '$wasabi_bucket' is accessible."
     else
-        warn "Could not list bucket '$wasabi_bucket'. Check:"
-        warn "  - Credentials are correct"
-        warn "  - Bucket exists in region '$wasabi_region'"
+        warn "Could not list bucket '$wasabi_bucket'."
         prompt "Continue anyway? [y/N]: " ans
         [[ ! "$ans" =~ ^[Yy] ]] && { warn "Skipping Wasabi."; return; }
     fi
 
-    # Timestamped backup helper
     cat > /usr/local/bin/wasabi-backup <<'BACKUP'
 #!/usr/bin/env bash
-# Usage: wasabi-backup <source_path> [remote_prefix]
-# Backs up a directory to Wasabi with timestamp
 set -euo pipefail
 SRC="$1"
 PREFIX="${2:-backup}"
@@ -533,6 +775,12 @@ BACKUP
     echo "  Usage: wasabi-backup /path/to/data [prefix]"
 }
 
+install_awscli_v2() {
+    info "Downloading AWS CLI v2..."
+    curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+    unzip -qq /tmp/awscliv2.zip -d /tmp && /tmp/aws/install 2>&1 | tail -1 || true
+}
+
 # ── 12. Wasabi Auto-Backup (cron) ───────────────────────────────────────────
 setup_wasabi_autobackup() {
     header "Automated Backups to Wasabi"
@@ -546,7 +794,6 @@ setup_wasabi_autobackup() {
     prompt "Set up daily auto-backup of /home + system configs to Wasabi? [y/N]: " ans
     [[ ! "$ans" =~ ^[Yy] ]] && { log "Skipping auto-backup."; return; }
 
-    # Source Wasabi env vars
     [[ -f /etc/profile.d/wasabi.sh ]] && source /etc/profile.d/wasabi.sh
     local bucket="${WASABI_BUCKET:-backup}"
     local region="${WASABI_REGION:-us-east-1}"
@@ -554,13 +801,7 @@ setup_wasabi_autobackup() {
     local backup_script="/usr/local/bin/wasabi-autobackup"
     cat > "$backup_script" <<'AUTOBACKUP'
 #!/usr/bin/env bash
-#===============================================================================
-# Wasabi Auto-Backup — runs daily via cron
-# Backs up: /home, /etc, /var/log, /var/www, /root
-# Uses aws s3 sync for efficient incremental backups
-#===============================================================================
 set -euo pipefail
-
 BUCKET="${WASABI_BUCKET:?WASABI_BUCKET not set}"
 REGION="${WASABI_REGION:?WASABI_REGION not set}"
 ENDPOINT="https://s3.${REGION}.wasabisys.com"
@@ -569,39 +810,31 @@ LOG="/var/log/wasabi-backup.log"
 
 echo "===== Wasabi Auto-Backup $TIMESTAMP =====" | tee -a "$LOG"
 
-# Rotate log
-if [[ -f "$LOG" && $(stat -c%s "$LOG") -gt 10485760 ]]; then
+if [[ -f "$LOG" && $(stat -c%s "$LOG" 2>/dev/null || stat -f%z "$LOG" 2>/dev/null) -gt 10485760 ]]; then
     mv "$LOG" "${LOG}.old"
 fi
 
-aws_base() {
-    aws s3 --endpoint-url "$ENDPOINT" "$@"
-}
+aws_base() { aws s3 --endpoint-url "$ENDPOINT" "$@"; }
 
-# Backup targets: <source> <s3_prefix>
 backup_dir() {
-    local src="$1"
-    local prefix="$2"
-    local name
-    name=$(basename "$src")
+    local src="$1" prefix="$2"
+    local name; name=$(basename "$src")
     local dest="s3://${BUCKET}/system/${prefix}/${name}"
     echo "[$(date '+%H:%M:%S')] Syncing $src → $dest" | tee -a "$LOG"
     aws_base sync "$src" "$dest" --delete 2>&1 | tee -a "$LOG" | tail -3
 }
 
-backup_dir /home         home
-backup_dir /etc          config
-backup_dir /root         root
-backup_dir /var/log      logs
-backup_dir /var/www      www
+backup_dir /home    home
+backup_dir /etc     config
+backup_dir /root    root
+backup_dir /var/log logs
+[[ -d /var/www ]] && backup_dir /var/www www
 
 echo "===== Complete =====" | tee -a "$LOG"
-echo
 AUTOBACKUP
     chmod +x "$backup_script"
     log "Auto-backup script created at $backup_script"
 
-    # Install daily cron job
     cat > /etc/cron.daily/wasabi-autobackup <<'CRON'
 #!/bin/bash
 source /etc/profile.d/wasabi.sh 2>/dev/null || true
@@ -616,45 +849,58 @@ CRON
     echo "    /etc        → s3://${bucket}/system/config/"
     echo "    /root       → s3://${bucket}/system/root/"
     echo "    /var/log    → s3://${bucket}/system/logs/"
-    echo "    /var/www    → s3://${bucket}/system/www/"
-    echo "  Runs daily at 6:25 AM (via /etc/cron.daily)"
+    echo "    /var/www    → s3://${bucket}/system/www/ (if exists)"
+    echo "  Runs daily via /etc/cron.daily"
     echo
 
-    # Ask for a test run
     prompt "Run a test backup now? [Y/n]: " ans
     if [[ "${ans:-y}" =~ ^[Yy] ]]; then
         info "Running test backup..."
-        "$backup_script" || warn "Test backup completed with errors (check /var/log/wasabi-backup.log)."
+        "$backup_script" || warn "Test backup had errors (check /var/log/wasabi-backup.log)."
         log "Test backup finished."
     fi
 }
 
-# ── 13. UFW + Fail2Ban + AbuseIPDB ─────────────────────────────────────────
+# ── 13. Firewall + Fail2Ban + AbuseIPDB ────────────────────────────────────
 setup_firewall() {
-    header "UFW Firewall Setup"
-    ufw --force reset 2>/dev/null || true
-    ufw default deny incoming
-    ufw default allow outgoing
-    ufw allow ssh
-    for port in "80/tcp" "443/tcp"; do
-        local ans
-        prompt "Allow $port? [y/N]: " ans
-        [[ "$ans" =~ ^[Yy] ]] && ufw allow "$port"
-    done
-    ufw --force enable
-    ufw status verbose
-    log "UFW configured."
+    header "Firewall Setup ($FW_TOOL)"
+
+    case "$FW_TOOL" in
+        ufw)
+            ufw --force reset 2>/dev/null || true
+            ufw default deny incoming
+            ufw default allow outgoing
+            ufw allow ssh
+            for port in "80/tcp" "443/tcp"; do
+                local ans
+                prompt "Allow $port? [y/N]: " ans
+                [[ "$ans" =~ ^[Yy] ]] && ufw allow "$port"
+            done
+            ufw --force enable
+            ufw status verbose ;;
+        firewalld)
+            systemctl enable --now firewalld 2>/dev/null || true
+            firewall-cmd --set-default-zone=drop 2>/dev/null || true
+            firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
+            for port in "80/tcp" "443/tcp"; do
+                local ans
+                prompt "Allow $port? [y/N]: " ans
+                [[ "$ans" =~ ^[Yy] ]] && firewall-cmd --permanent --add-port="$port" 2>/dev/null || true
+            done
+            firewall-cmd --reload 2>/dev/null || true
+            firewall-cmd --list-all ;;
+    esac
+    log "Firewall ($FW_TOOL) configured."
 }
 
 setup_fail2ban() {
     header "Fail2Ban + AbuseIPDB Setup"
     if ! command -v fail2ban-server &>/dev/null; then
-        apt-get install -y -qq fail2ban
+        pkg_install fail2ban
     fi
 
     local abuse_key
     prompt "AbuseIPDB API Key (leave blank to skip): " abuse_key
-
     mkdir -p /etc/fail2ban/action.d
 
     if [[ -n "$abuse_key" ]]; then
@@ -663,17 +909,20 @@ setup_fail2ban() {
             sed -i "s/abuseipdb_apikey =.*/abuseipdb_apikey = $abuse_key/" /etc/fail2ban/action.d/abuseipdb.conf 2>/dev/null || true
             log "AbuseIPDB action installed."
         else
-            warn "Could not fetch AbuseIPDB action; skipping."
+            warn "Could not fetch AbuseIPDB action."
         fi
     fi
 
-    cat > /etc/fail2ban/jail.local <<'JAIL'
+    local banaction="ufw"
+    [[ "$FW_TOOL" == "firewalld" ]] && banaction="firewallcmd-rich-rules"
+
+    cat > /etc/fail2ban/jail.local <<JAIL
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1
 bantime = 3600
 findtime = 600
 maxretry = 5
-banaction = ufw
+banaction = $banaction
 action = %(action_)s
 destemail = root@localhost
 sender = root@localhost
@@ -695,9 +944,9 @@ maxretry = 2
 findtime = 60
 bantime = 3600
 
-[ufw]
+[$FW_TOOL]
 enabled = true
-logpath = /var/log/ufw.log
+logpath = /var/log/${FW_TOOL}.log
 maxretry = 5
 bantime = 3600
 JAIL
@@ -711,7 +960,7 @@ action = abuseipdb
 JAIL_ABUSE
     fi
 
-    systemctl enable --now fail2ban
+    systemctl enable --now fail2ban 2>/dev/null || true
     log "Fail2Ban configured."
 }
 
@@ -729,10 +978,9 @@ show_summary() {
     info "Hostname     : $(hostname -f 2>/dev/null || hostname)"
     info "Public IP    : $(curl -s4 ifconfig.me 2>/dev/null || curl -s4 icanhazip.com 2>/dev/null || echo 'unknown')"
     info "Local IP     : $(ip -4 addr show | awk '/inet/{print $2}' | grep -v 127.0.0.1 | cut -d/ -f1 | head -1)"
+    info "OS           : $OS_ID $OS_VERSION_ID ($OS_FAMILY)"
     echo
-    info "Installed: curl wget htop mc ncdu btop iftop iotop nethogs sysstat dstat"
-    info "          iperf3 smartmontools screen tmux jq rsync git nodejs python3"
-    info "          opencode claude-code ufw fail2ban"
+    info "Installed packages, tools, and security hardening."
     echo
     log "Reboot recommended to apply all updates."
     echo
@@ -746,22 +994,23 @@ cat << "EOF"
    / _ \/ /   / /    / /    (_)___/ /__  ___
   / , _/ /__ / _ \  / _ \  / / __/ / _ \/ _ \
  /_/|_/____//_.__/ /_.__/ /_/\__/_/\___/ .__/
-                                       /_/
+                                        /_/
 EOF
 echo -e "${NC}"
 echo "  RHLinuxConfig — Universal Linux Setup & Hardening Wizard"
 echo "  $(date)"
 echo
 
+detect_distro
 show_info
 
-# ── Wizard mode (default) ────────────────────────────────────────────────────
+# ── Run modes ────────────────────────────────────────────────────────────────
 if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     header "QUICK MODE"
     do_update
     do_install
     do_install_latest
-    log "Quick mode done. Run without --quick for full wizard."
+    log "Quick mode done."
     exit 0
 fi
 
@@ -781,7 +1030,7 @@ fi
 # ── Wizard: Interactive Setup ────────────────────────────────────────────────
 echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}  Welcome to the RHLinuxConfig Setup Wizard!              ${NC}"
-echo -e "${YELLOW}  You will be guided through all configuration steps.     ${NC}"
+echo -e "${YELLOW}  Detected: $OS_ID $OS_VERSION_ID ($OS_FAMILY)          ${NC}"
 echo -e "${YELLOW}  Press Enter to accept defaults shown in [brackets].     ${NC}"
 echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
 echo
