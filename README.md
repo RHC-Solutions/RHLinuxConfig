@@ -38,8 +38,9 @@ Auto-detects your OS and adapts package names, firewall, network config, and def
 | **11. Telegram** | Bot token + Chat ID, validates token, sends test message |
 | **12. Wasabi S3** | Credentials + bucket, validates connection, `wasabi-backup` helper |
 | **13. Auto-Backup** | Daily `cron.daily` backup of `/home`, `/etc`, `/root`, `/var/log`, `/var/www` to Wasabi via `aws s3 sync` |
-| **14. Firewall** | **Debian/Arch**: UFW · **RHEL/SUSE**: firewalld |
-| **15. Fail2Ban** | SSH, SSH-DDoS, firewall jails + optional AbuseIPDB |
+| **14. Cloudflare DNS** | API token + zone + record name, validates token, creates `cloudflare-dns` updater, optional hourly cron |
+| **15. Firewall** | **Debian/Arch**: UFW · **RHEL/SUSE**: firewalld |
+| **16. Fail2Ban** | SSH, SSH-DDoS, firewall jails + optional AbuseIPDB |
 
 ## Post-Install Helpers
 
@@ -54,6 +55,10 @@ wasabi-backup /etc configs
 
 # Run the auto-backup
 /usr/local/bin/wasabi-autobackup
+
+# Update Cloudflare DNS A record to current IP
+cloudflare-dns
+cloudflare-dns --ip 203.0.113.10    # specify IP manually
 ```
 
 ## Requirements
