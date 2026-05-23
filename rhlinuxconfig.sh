@@ -8,6 +8,20 @@
 #===============================================================================
 set -euo pipefail
 
+# ── Reattach to the terminal when piped (curl | bash, wget | bash, etc.) ────
+# Without this, every `read` returns EOF instantly: prompts flash by, the
+# 5s countdown becomes microseconds, and auto_reboot would fire with no
+# chance to cancel.
+NO_TTY=0
+if [[ ! -t 0 ]]; then
+    if [[ -r /dev/tty ]]; then
+        exec < /dev/tty
+    else
+        # Truly headless (no controlling terminal at all)
+        NO_TTY=1
+    fi
+fi
+
 # ── Non-interactive package installers ──────────────────────────────────────
 # Prevents apt/dpkg from prompting for service config (iperf3 daemon, etc.)
 # and stops needrestart from interrupting on Ubuntu 22.04+.
@@ -47,6 +61,12 @@ AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
 prompt(){
     local msg="$1"; shift
     local varname="${1:-}"
+    # No terminal at all (piped + /dev/tty unavailable) → take defaults
+    if [[ "${NO_TTY:-0}" -eq 1 ]]; then
+        [[ -n "$varname" ]] && printf -v "$varname" '%s' "y"
+        echo -e "${CYAN}→${NC}  $msg ${YELLOW}y${NC} (no-tty)"
+        return 0
+    fi
     if [[ "$AUTO_YES_TIMEOUT" -gt 0 ]]; then
         if read -rt "$AUTO_YES_TIMEOUT" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
             return 0
@@ -1537,6 +1557,15 @@ auto_reboot() {
     header "Reboot Required"
     info "Setup finished successfully — a reboot is recommended to apply"
     info "kernel updates, group memberships, and PATH changes."
+
+    # If we have no terminal, do NOT auto-reboot — the operator may be running
+    # this from a script and would have no chance to cancel.
+    if [[ "${NO_TTY:-0}" -eq 1 ]]; then
+        warn "No TTY detected — skipping auto-reboot."
+        warn "Run 'sudo reboot' manually to finalize the setup."
+        return 0
+    fi
+
     echo
     echo "  [Y] or [Enter]  →  reboot now"
     echo "  [N]             →  skip and reboot later (sudo reboot)"
