@@ -1132,19 +1132,25 @@ setup_telegram() {
     echo
 
     local ans
-    prompt "Set up Telegram notifications? [Y/n]: " ans
-    [[ ! "${ans:-y}" =~ ^[Yy] ]] && { log "Skipping Telegram."; return; }
+    prompt "Set up Telegram notifications? [y/N]: " ans
+    [[ ! "$ans" =~ ^[Yy] ]] && { log "Skipping Telegram."; return; }
 
-    local tg_token tg_chat script
+    local tg_token tg_chat script tries
+    tries=0
     while true; do
         prompt "Telegram Bot Token (e.g. 123456:ABC-DEF...): " tg_token
         [[ -n "$tg_token" ]] && break
-        warn "Token cannot be empty."
+        tries=$((tries + 1))
+        warn "Token cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Telegram setup — no token given."; return; }
     done
+    tries=0
     while true; do
         prompt "Telegram Chat ID (numeric, e.g. 123456789): " tg_chat
         [[ -n "$tg_chat" ]] && break
-        warn "Chat ID cannot be empty."
+        tries=$((tries + 1))
+        warn "Chat ID cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Telegram setup — no chat ID given."; return; }
     done
 
     info "Testing Telegram connection..."
@@ -1195,21 +1201,30 @@ setup_wasabi() {
     prompt "Set up Wasabi S3 backup? [y/N]: " ans
     [[ ! "$ans" =~ ^[Yy] ]] && { log "Skipping Wasabi."; return; }
 
-    local wasabi_key wasabi_secret wasabi_bucket wasabi_region
+    local wasabi_key wasabi_secret wasabi_bucket wasabi_region tries
+    tries=0
     while true; do
         prompt "Wasabi Access Key      : " wasabi_key
         [[ -n "$wasabi_key" ]] && break
-        warn "Access Key cannot be empty."
+        tries=$((tries + 1))
+        warn "Access Key cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Wasabi setup — no access key."; return; }
     done
+    tries=0
     while true; do
         prompt "Wasabi Secret Key      : " wasabi_secret
         [[ -n "$wasabi_secret" ]] && break
-        warn "Secret Key cannot be empty."
+        tries=$((tries + 1))
+        warn "Secret Key cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Wasabi setup — no secret key."; return; }
     done
+    tries=0
     while true; do
         prompt "Wasabi Bucket Name     : " wasabi_bucket
         [[ -n "$wasabi_bucket" ]] && break
-        warn "Bucket name cannot be empty."
+        tries=$((tries + 1))
+        warn "Bucket name cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Wasabi setup — no bucket."; return; }
     done
     prompt "Wasabi Region [us-east-1]: " wasabi_region
     wasabi_region="${wasabi_region:-us-east-1}"
@@ -1376,23 +1391,31 @@ setup_cloudflare() {
     prompt "Set up Cloudflare DNS updates? [y/N]: " ans
     [[ ! "$ans" =~ ^[Yy] ]] && { log "Skipping Cloudflare."; return; }
 
-    local cf_token cf_zone cf_name cf_ttl cf_proxied
+    local cf_token cf_zone cf_name cf_ttl cf_proxied tries
+    tries=0
     while true; do
         prompt "Cloudflare API Token : " cf_token
         [[ -n "$cf_token" ]] && break
-        warn "API Token cannot be empty."
+        tries=$((tries + 1))
+        warn "API Token cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Cloudflare setup — no token."; return; }
     done
+    tries=0
     while true; do
         prompt "Zone ID             : " cf_zone
         [[ -n "$cf_zone" ]] && break
-        warn "Zone ID cannot be empty."
+        tries=$((tries + 1))
+        warn "Zone ID cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Cloudflare setup — no zone ID."; return; }
     done
+    tries=0
     while true; do
         prompt "DNS Record Name     : " cf_name
         local fqdn="${cf_name:-}"
-        # If just a hostname, append zone-derived domain
         [[ -n "$fqdn" ]] && break
-        warn "Record name cannot be empty."
+        tries=$((tries + 1))
+        warn "Record name cannot be empty (attempt $tries/3)."
+        (( tries >= 3 )) && { warn "Aborting Cloudflare setup — no record name."; return; }
     done
     prompt "TTL (120-86400s)    [120]: " cf_ttl
     cf_ttl="${cf_ttl:-120}"
