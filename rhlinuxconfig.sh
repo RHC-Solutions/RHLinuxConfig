@@ -61,19 +61,36 @@ AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
 prompt(){
     local msg="$1"; shift
     local varname="${1:-}"
+
+    # Confirmation prompts include "[Y/n]", "[y/N]", "[y/n]", or "[Y/N]" in
+    # the message. Text-input prompts include a "[default-value]" instead.
+    # On timeout / no-tty, confirmations default to "y"; text inputs default
+    # to empty string so the caller's "${var:-fallback}" picks up the
+    # documented default shown in brackets.
+    local is_confirm="" timeout_default=""
+    if [[ "$msg" =~ \[[YyNn]/[YyNn]\] ]]; then
+        is_confirm=1
+        timeout_default="y"
+    fi
+
     # No terminal at all (piped + /dev/tty unavailable) → take defaults
     if [[ "${NO_TTY:-0}" -eq 1 ]]; then
-        [[ -n "$varname" ]] && printf -v "$varname" '%s' "y"
-        echo -e "${CYAN}→${NC}  $msg ${YELLOW}y${NC} (no-tty)"
+        [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
+        echo -e "${CYAN}→${NC}  $msg ${YELLOW}${timeout_default:-<default>}${NC} (no-tty)"
         return 0
     fi
+
     if [[ "$AUTO_YES_TIMEOUT" -gt 0 ]]; then
         if read -rt "$AUTO_YES_TIMEOUT" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
             return 0
         else
-            # Timeout (or read error) — auto-answer "y"
-            [[ -n "$varname" ]] && printf -v "$varname" '%s' "y"
-            echo -e " ${YELLOW}y${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+            # Timeout (or read error) — apply per-type default
+            [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
+            if [[ -n "$is_confirm" ]]; then
+                echo -e " ${YELLOW}y${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+            else
+                echo -e " ${YELLOW}<default>${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+            fi
             return 0
         fi
     else
@@ -631,12 +648,15 @@ do_install_extras() {
     # Includes 'netperf' (likely intent of 'nperf') and 'speedtest-cli'
     # (Python alternative); Ookla's official 'speedtest' CLI is installed
     # separately by do_install_speedtest below since it needs a binary fetch.
-    local extras="perl vim nano atop nmon traceroute telnet lynx mlocate nload bmon tcptrack vnstat ifstat darkstat netperf speedtest-cli"
+    # mlocate is deprecated on Ubuntu 22.04+ (replaced by plocate) — list both
+    # so the best-effort installer picks whichever the distro ships.
+    local extras="perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat netperf speedtest-cli"
 
-    # Per-family additions / name remaps
+    # Per-family additions / name remaps. slurm bandwidth tool moved around in
+    # Debian: list both 'slurm' and 'slurm-tools' so whichever exists installs.
     case "$OS_FAMILY" in
         debian)
-            extras="$extras man-db netcat-openbsd iptraf-ng snmp ntopng pktstat cbm speedometer slurm-tools gzip"
+            extras="$extras man-db netcat-openbsd iptraf-ng snmp ntopng pktstat cbm speedometer slurm slurm-tools gzip"
             ;;
         rhel)
             extras="$extras man nmap-ncat iptraf-ng net-snmp net-snmp-utils ntopng pktstat cbm gzip"
