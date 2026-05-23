@@ -62,15 +62,20 @@ prompt(){
     local msg="$1"; shift
     local varname="${1:-}"
 
-    # Confirmation prompts include "[Y/n]", "[y/N]", "[y/n]", or "[Y/N]" in
-    # the message. Text-input prompts include a "[default-value]" instead.
-    # On timeout / no-tty, confirmations default to "y"; text inputs default
-    # to empty string so the caller's "${var:-fallback}" picks up the
-    # documented default shown in brackets.
+    # Detect prompt type and default:
+    #   "[Y/n]" → confirmation, default YES → auto-answer "y"
+    #   "[y/N]" → confirmation, default NO  → auto-answer "n" (skip wizards)
+    #   "[y/n]" or "[Y/N]" → confirmation, no explicit default → default "n" (safer)
+    #   anything else with "[default]" → text input, auto-answer "" so the
+    #     caller's "${var:-fallback}" pattern picks up the bracketed default.
+    #
+    # Respecting the visible capitalization prevents the script from forcing
+    # destructive defaults (e.g. switching DHCP→static, opening firewall
+    # ports, attempting cloud integrations that need real credentials).
     local is_confirm="" timeout_default=""
-    if [[ "$msg" =~ \[[YyNn]/[YyNn]\] ]]; then
-        is_confirm=1
-        timeout_default="y"
+    if   [[ "$msg" =~ \[Y/n\] ]]; then is_confirm=1; timeout_default="y"
+    elif [[ "$msg" =~ \[y/N\] ]]; then is_confirm=1; timeout_default="n"
+    elif [[ "$msg" =~ \[[YyNn]/[YyNn]\] ]]; then is_confirm=1; timeout_default="n"
     fi
 
     # No terminal at all (piped + /dev/tty unavailable) → take defaults
@@ -87,7 +92,7 @@ prompt(){
             # Timeout (or read error) — apply per-type default
             [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
             if [[ -n "$is_confirm" ]]; then
-                echo -e " ${YELLOW}y${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+                echo -e " ${YELLOW}${timeout_default}${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
             else
                 echo -e " ${YELLOW}<default>${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
             fi
