@@ -8,6 +8,15 @@
 #===============================================================================
 set -euo pipefail
 
+# ── Non-interactive package installers ──────────────────────────────────────
+# Prevents apt/dpkg from prompting for service config (iperf3 daemon, etc.)
+# and stops needrestart from interrupting on Ubuntu 22.04+.
+export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NONINTERACTIVE_SEEN=true
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export APT_LISTCHANGES_FRONTEND=none
+
 # ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; MAG='\033[0;35m'; NC='\033[0m'
 
@@ -16,9 +25,25 @@ warn()  { echo -e "${YELLOW}[!]${NC}  $*"; }
 err()   { echo -e "${RED}[✗]${NC}  $*"; }
 info()  { echo -e "${CYAN}[i]${NC}  $*"; }
 header(){ echo -e "\n${MAG}══ $* ══${NC}"; }
+# Auto-yes timeout: prompts auto-accept "y" after this many seconds of inactivity.
+# Set AUTO_YES_TIMEOUT=0 to disable (wait forever for input).
+AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
+
 prompt(){
     local msg="$1"; shift
-    read -rp "$(echo -e "${CYAN}→${NC}  $msg")" "$@" || true
+    local varname="${1:-}"
+    if [[ "$AUTO_YES_TIMEOUT" -gt 0 ]]; then
+        if read -rt "$AUTO_YES_TIMEOUT" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
+            return 0
+        else
+            # Timeout (or read error) — auto-answer "y"
+            [[ -n "$varname" ]] && printf -v "$varname" '%s' "y"
+            echo -e " ${YELLOW}y${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+            return 0
+        fi
+    else
+        read -rp "$(echo -e "${CYAN}→${NC}  $msg")" "$@" || true
+    fi
 }
 
 # ── Root check ──────────────────────────────────────────────────────────────
@@ -55,11 +80,12 @@ detect_distro() {
     case "$OS_FAMILY" in
         debian)
             PKG_MGR="apt"
-            PKG_INSTALL="apt-get install -y -qq"
-            PKG_INSTALL_NQ="apt-get install -y"    # non-quiet for interactive
+            local APT_OPTS='-y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o APT::Get::Assume-Yes=true'
+            PKG_INSTALL="apt-get install $APT_OPTS"
+            PKG_INSTALL_NQ="apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"
             PKG_UPDATE="apt-get update -qq"
-            PKG_UPGRADE="apt-get full-upgrade -y -qq"
-            PKG_AUTOREMOVE="apt-get autoremove -y -qq; apt-get autoclean -qq"
+            PKG_UPGRADE="apt-get full-upgrade $APT_OPTS"
+            PKG_AUTOREMOVE="apt-get autoremove $APT_OPTS; apt-get autoclean -qq"
             PKG_CHECK="dpkg -s"
             PKG_SEARCH="apt-cache search"
             PKG_REPO_ADD="add-apt-repository -y"

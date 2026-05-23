@@ -1,8 +1,24 @@
-# RHLinuxConfig
+# RHC Solutions
+
+```text
+ ____  _   _  ____    ____        _       _   _
+|  _ \| | | |/ ___|  / ___|  ___ | |_   _| |_(_) ___  _ __  ___
+| |_) | |_| | |      \___ \ / _ \| | | | | __| |/ _ \| '_ \/ __|
+|  _ <|  _  | |___    ___) | (_) | | |_| | |_| | (_) | | | \__ \
+|_| \_\_| |_|\____|  |____/ \___/|_|\__,_|\__|_|\___/|_| |_|___/
+```
+
+**Website:** [rhcsolutions.com](https://rhcsolutions.com) &nbsp;·&nbsp; **Telegram:** [t.me/rhcsolutions](https://t.me/rhcsolutions)
+
+---
+
+## RHLinuxConfig
 
 Universal Linux server setup & hardening wizard. One script, every major distro — automatically detects your OS, sets timezone from your public IP, installs a curated toolchain, hardens the system, and wires up optional cloud integrations (Telegram, Wasabi, Cloudflare).
 
 Supports **AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Linux Mint, Arch, Manjaro, openSUSE, SLES**.
+
+Prompts during the interactive wizard **auto-accept "yes" after 5 seconds** of inactivity — walk away and the install completes itself with sensible defaults.
 
 ---
 
