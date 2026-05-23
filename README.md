@@ -24,16 +24,27 @@ Prompts during the interactive wizard **auto-accept "yes" after 5 seconds** of i
 
 ## Installation
 
-One command. Run as root on a fresh server:
+**Two-step install** (recommended — handles sudo password and the script's interactive prompts cleanly):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh -o /tmp/rhlinuxconfig.sh
+sudo bash /tmp/rhlinuxconfig.sh
 ```
 
-Add `--quick` or `--unattended` (see [Run Modes](#run-modes)):
+For non-interactive or quick mode add the flag to the second line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh | sudo bash -s -- --unattended
+sudo bash /tmp/rhlinuxconfig.sh --unattended   # or --quick
+```
+
+### Why not `curl … | sudo bash`?
+
+That one-liner pattern is fragile here because `sudo` needs to prompt for a password while `curl` is still writing to the pipe. Symptoms include the password prompt appearing to hang, or `curl: (23) Failure writing output to destination` after Ctrl-C. Download first, then run — it's two short lines and works on every distro.
+
+If you're root already, you can run it directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh | bash
 ```
 
 ---
