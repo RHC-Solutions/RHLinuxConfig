@@ -810,8 +810,23 @@ do_install_pi() {
         return 0
     fi
 
-    info "Running official installer (curl pi.dev | bash)..."
-    if curl -fsSL https://pi.dev 2>/dev/null | bash 2>&1 | tail -5; then
+    # Safety: pi.dev is an unverified URL. Probe it first — only pipe to bash
+    # if the response looks like a shell script (starts with shebang or 'set').
+    # Hard 20s wall-clock cap so this step can never hang the whole run.
+    info "Probing pi.dev for a shell installer (max 20s)..."
+    local probe
+    probe=$(curl -fsSL --max-time 10 https://pi.dev 2>/dev/null | head -c 200 || true)
+    if [[ -z "$probe" ]]; then
+        warn "pi.dev did not respond — skipping."
+        return 1
+    fi
+    if ! echo "$probe" | head -1 | grep -qE '^(#!/|#!/usr/bin/env|set -[eu]|export )'; then
+        warn "pi.dev did not return a shell script (got: ${probe:0:60}...). Skipping."
+        return 1
+    fi
+
+    info "Running installer (curl pi.dev | bash, 60s timeout)..."
+    if timeout 60 bash -c 'curl -fsSL --max-time 30 https://pi.dev | bash' 2>&1 | tail -5; then
         # Common install destinations for one-line bash installers
         for d in /usr/local/bin /root/.local/bin /root/.pi/bin; do
             [[ -x "$d/pi" ]] && export PATH="$d:$PATH"
