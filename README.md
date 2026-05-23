@@ -5,9 +5,9 @@ Universal Linux server setup & hardening wizard supporting **AlmaLinux, Rocky, C
 ## Quick Start
 
 ```bash
-sudo bash setup.sh                   # Full interactive wizard
-sudo bash setup.sh --quick           # Info + update + base tools only
-sudo bash setup.sh --unattended      # Full setup with no prompts
+sudo bash rhlinuxconfig.sh                   # Full interactive wizard
+sudo bash rhlinuxconfig.sh --quick           # Info + update + base tools only
+sudo bash rhlinuxconfig.sh --unattended      # Full setup with no prompts
 ```
 
 ## Supported Distros

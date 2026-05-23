@@ -198,6 +198,112 @@ gen_pass() {
     echo
 }
 
+# ── 0. Auto-set Location, Timezone, Date/Time (via ipinfo.io) ───────────────
+auto_set_location() {
+    header "Auto-Configure Location & Time (ipinfo.io)"
+
+    # Ensure curl + jq exist (jq optional, fallback to python3)
+    if ! command -v curl &>/dev/null; then
+        info "Installing curl..."
+        pkg_install curl || $PKG_INSTALL curl 2>/dev/null || true
+    fi
+
+    local geo public_ip city region country tz loc
+    info "Querying ipinfo.io for geolocation..."
+    geo=$(curl -fsS --max-time 8 "https://ipinfo.io/json" 2>/dev/null || echo "")
+    if [[ -z "$geo" ]]; then
+        warn "ipinfo.io unreachable — skipping auto-location."
+        return
+    fi
+
+    # Parse field — prefer jq, then python3, then sed fallback
+    parse_json() {
+        local key="$1"
+        if command -v jq &>/dev/null; then
+            printf '%s' "$geo" | jq -r ".${key} // empty" 2>/dev/null
+        elif command -v python3 &>/dev/null; then
+            printf '%s' "$geo" | python3 -c "import sys,json
+try:
+    print(json.load(sys.stdin).get('$key',''))
+except Exception:
+    pass" 2>/dev/null
+        else
+            printf '%s' "$geo" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1
+        fi
+    }
+    public_ip=$(parse_json ip)
+    city=$(parse_json city)
+    region=$(parse_json region)
+    country=$(parse_json country)
+    tz=$(parse_json timezone)
+    loc=$(parse_json loc)
+
+    info "Public IP    : ${public_ip:-unknown}"
+    info "Location     : ${city:-?}, ${region:-?}, ${country:-?}"
+    info "Coordinates  : ${loc:-?}"
+    info "Timezone     : ${tz:-?}"
+
+    # ── Set timezone ────────────────────────────────────────────────────────
+    if [[ -n "$tz" ]]; then
+        if command -v timedatectl &>/dev/null; then
+            if timedatectl set-timezone "$tz" 2>/dev/null; then
+                log "Timezone set to $tz via timedatectl."
+            else
+                warn "timedatectl could not set $tz — installing tzdata."
+                pkg_install tzdata 2>/dev/null || true
+                timedatectl set-timezone "$tz" 2>/dev/null || \
+                    ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+                echo "$tz" > /etc/timezone 2>/dev/null || true
+                log "Timezone set to $tz (fallback)."
+            fi
+        else
+            ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+            echo "$tz" > /etc/timezone 2>/dev/null || true
+            log "Timezone set to $tz via symlink."
+        fi
+    else
+        warn "No timezone from ipinfo — keeping current."
+    fi
+
+    # ── Enable NTP / time sync ──────────────────────────────────────────────
+    info "Enabling NTP time synchronization..."
+    if command -v timedatectl &>/dev/null; then
+        timedatectl set-ntp true 2>/dev/null || true
+    fi
+
+    # Install + start chrony (preferred) or systemd-timesyncd
+    if ! systemctl is-active --quiet chrony 2>/dev/null && \
+       ! systemctl is-active --quiet chronyd 2>/dev/null && \
+       ! systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        case "$OS_FAMILY" in
+            debian) pkg_install chrony 2>/dev/null || pkg_install systemd-timesyncd ;;
+            rhel)   pkg_install chrony 2>/dev/null || true ;;
+            arch)   pkg_install chrony 2>/dev/null || true ;;
+            suse)   pkg_install chrony 2>/dev/null || true ;;
+        esac
+        systemctl enable --now chronyd 2>/dev/null || \
+            systemctl enable --now chrony 2>/dev/null || \
+            systemctl enable --now systemd-timesyncd 2>/dev/null || true
+    fi
+
+    # Force an immediate sync
+    if command -v chronyc &>/dev/null; then
+        chronyc -a makestep &>/dev/null || true
+    elif command -v ntpdate &>/dev/null; then
+        ntpdate -u pool.ntp.org &>/dev/null || true
+    fi
+
+    info "Current date : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+    # Export for downstream use (cloudflare/telegram messages etc.)
+    export DETECTED_TZ="$tz"
+    export DETECTED_CITY="$city"
+    export DETECTED_COUNTRY="$country"
+    export DETECTED_PUBLIC_IP="$public_ip"
+
+    log "Location & time configured automatically."
+}
+
 # ── 1. System & Network Info ────────────────────────────────────────────────
 show_info() {
     echo; header "System Information"
@@ -355,6 +461,34 @@ do_install_latest() {
             pkg_install python3 python3-pip python3-devel || true
             log "Python $(python3 --version 2>/dev/null) installed." ;;
     esac
+}
+
+# ── 4.5 Install Midnight Commander (mc) ─────────────────────────────────────
+do_install_mc() {
+    header "Installing Midnight Commander (mc)"
+    if command -v mc &>/dev/null; then
+        log "mc already installed: $(mc --version 2>/dev/null | head -1)"
+    else
+        pkg_install mc
+        command -v mc &>/dev/null && log "mc installed: $(mc --version 2>/dev/null | head -1)" \
+            || { warn "mc install failed."; return; }
+    fi
+
+    # Set mcedit as the system default editor where supported
+    if command -v update-alternatives &>/dev/null && command -v mcedit &>/dev/null; then
+        update-alternatives --install /usr/bin/editor editor "$(command -v mcedit)" 30 2>/dev/null || true
+    fi
+
+    # Drop-in profile: alias + nice defaults for root and odin (if present)
+    cat > /etc/profile.d/mc.sh <<'EOF'
+# Midnight Commander defaults
+export EDITOR="${EDITOR:-mcedit}"
+export VISUAL="${VISUAL:-mcedit}"
+alias mc='mc -x'      # enable mouse + xterm features
+alias mcc='mc -c'     # force color
+EOF
+    chmod +x /etc/profile.d/mc.sh
+    log "mc defaults installed at /etc/profile.d/mc.sh (EDITOR=mcedit, mouse on)"
 }
 
 # ── 5. Install opencode ─────────────────────────────────────────────────────
@@ -1156,6 +1290,7 @@ echo "  $(date)"
 echo
 
 detect_distro
+auto_set_location
 show_info
 
 # ── Run modes ────────────────────────────────────────────────────────────────
@@ -1163,6 +1298,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     header "QUICK MODE"
     do_update
     do_install
+    do_install_mc
     do_install_latest
     log "Quick mode done."
     exit 0
@@ -1172,6 +1308,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     header "UNATTENDED MODE"
     do_update
     do_install
+    do_install_mc
     do_install_latest
     do_install_opencode
     do_install_claude
@@ -1191,6 +1328,7 @@ echo
 
 do_update
 do_install
+do_install_mc
 do_install_latest
 do_install_opencode
 do_install_claude
