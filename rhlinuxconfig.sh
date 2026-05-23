@@ -559,28 +559,35 @@ do_install_opencode() {
     header "Installing opencode"
     if command -v opencode &>/dev/null; then
         log "opencode already installed: $(opencode --version 2>/dev/null || echo 'present')"
-        return
+        return 0
     fi
-    if ! command -v npx &>/dev/null; then
-        warn "npm/npx not found — skipping opencode."
-        return
-    fi
-    info "Installing @opencode-ai/opencode globally via npm..."
-    npm install -g @opencode-ai/opencode 2>&1 | tail -3 || {
-        warn "opencode npm install failed — check network / npm permissions."
-        return
-    }
-    log "opencode installed: $(opencode --version 2>/dev/null || echo 'ok')"
 
+    # Write the PATH profile up-front so the post-install binary is discoverable
     cat > /etc/profile.d/opencode.sh <<'EOF'
-if [[ ":$PATH:" != *":/usr/local/share/npm-global/bin:"* ]]; then
-    export PATH="/usr/local/share/npm-global/bin:$PATH"
+if [[ -d /root/.opencode/bin && ":$PATH:" != *":/root/.opencode/bin:"* ]]; then
+    export PATH="/root/.opencode/bin:$PATH"
 fi
-if [[ ":$PATH:" != *":$HOME/.opencode/bin:"* ]]; then
+if [[ -d "$HOME/.opencode/bin" && ":$PATH:" != *":$HOME/.opencode/bin:"* ]]; then
     export PATH="$HOME/.opencode/bin:$PATH"
 fi
 EOF
     chmod +x /etc/profile.d/opencode.sh
+
+    info "Installing opencode via official installer (opencode.ai/install)..."
+    if curl -fsSL https://opencode.ai/install | bash 2>&1 | tail -5; then
+        # Make the binary visible to the current script process too
+        export PATH="/root/.opencode/bin:$PATH"
+        if command -v opencode &>/dev/null || [[ -x /root/.opencode/bin/opencode ]]; then
+            log "opencode installed: $(/root/.opencode/bin/opencode --version 2>/dev/null || opencode --version 2>/dev/null || echo 'ok')"
+        else
+            warn "Official installer finished but 'opencode' not found in /root/.opencode/bin."
+            return 1
+        fi
+    else
+        warn "opencode installer failed — check network / TLS / DNS."
+        return 1
+    fi
+
     if ! grep -q "opencode" /root/.bashrc 2>/dev/null; then
         echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> /root/.bashrc
     fi
@@ -1253,13 +1260,30 @@ setup_fail2ban() {
     mkdir -p /etc/fail2ban/action.d
 
     if [[ -n "$abuse_key" ]]; then
-        local abuse_url="https://raw.githubusercontent.com/abuseipdb/abuseipdb-fail2ban/master/action.d/abuseipdb.conf"
-        if curl -sfL "$abuse_url" -o /etc/fail2ban/action.d/abuseipdb.conf; then
-            sed -i "s/abuseipdb_apikey =.*/abuseipdb_apikey = $abuse_key/" /etc/fail2ban/action.d/abuseipdb.conf 2>/dev/null || true
-            log "AbuseIPDB action installed."
-        else
-            warn "Could not fetch AbuseIPDB action."
-        fi
+        # Write AbuseIPDB action inline — no external dependency.
+        # Category 18 = brute-force, 22 = SSH (default scope for sshd jail).
+        cat > /etc/fail2ban/action.d/abuseipdb.conf <<'ABUSE'
+# Fail2Ban action: report banned IPs to AbuseIPDB (https://www.abuseipdb.com)
+[Definition]
+actionstart =
+actionstop =
+actioncheck =
+actionban = curl --fail --silent --tlsv1.2 \
+            --data-urlencode "ip=<ip>" \
+            --data "categories=<abuseipdb_category>" \
+            --data-urlencode "comment=<matches>" \
+            --url "https://api.abuseipdb.com/api/v2/report" \
+            -H "Key: <abuseipdb_apikey>" \
+            -H "Accept: application/json" \
+            -o /dev/null
+actionunban =
+
+[Init]
+abuseipdb_apikey =
+abuseipdb_category = 18,22
+ABUSE
+        sed -i "s|^abuseipdb_apikey =.*|abuseipdb_apikey = $abuse_key|" /etc/fail2ban/action.d/abuseipdb.conf
+        log "AbuseIPDB action installed (inline template, no external fetch)."
     fi
 
     local banaction="ufw"
@@ -1361,7 +1385,40 @@ auto_reboot() {
     systemctl reboot 2>/dev/null || reboot
 }
 
-# ── Final summary ───────────────────────────────────────────────────────────
+# ── Final summary (detection-based: pass / fail / skipped) ──────────────────
+SUM_OK=0; SUM_FAIL=0; SUM_SKIP=0
+
+# Status line — green check / red cross / dim dash with a version/detail column
+sum_pass() {
+    local label="$1" detail="${2:-}"
+    printf "  ${GREEN}✓${NC} %-32s ${CYAN}%s${NC}\n" "$label" "$detail"
+    SUM_OK=$((SUM_OK + 1))
+}
+sum_fail() {
+    local label="$1" detail="${2:-failed}"
+    printf "  ${RED}✗${NC} %-32s ${RED}%s${NC}\n" "$label" "$detail"
+    SUM_FAIL=$((SUM_FAIL + 1))
+}
+sum_skip() {
+    local label="$1" detail="${2:-not configured}"
+    printf "  ${YELLOW}-${NC} %-32s ${YELLOW}%s${NC}\n" "$label" "$detail"
+    SUM_SKIP=$((SUM_SKIP + 1))
+}
+
+# Returns 0 if any firewall is active
+_fw_active() {
+    case "$FW_TOOL" in
+        ufw)       ufw status 2>/dev/null | head -1 | grep -qi "active" ;;
+        firewalld) systemctl is-active --quiet firewalld ;;
+        *) return 1 ;;
+    esac
+}
+_ntp_active() {
+    systemctl is-active --quiet chronyd 2>/dev/null \
+     || systemctl is-active --quiet chrony 2>/dev/null \
+     || systemctl is-active --quiet systemd-timesyncd 2>/dev/null
+}
+
 show_summary() {
     echo
     header "Setup Complete"
@@ -1369,12 +1426,55 @@ show_summary() {
     info "Public IP    : $(curl -s4 ifconfig.me 2>/dev/null || curl -s4 icanhazip.com 2>/dev/null || echo 'unknown')"
     info "Local IP     : $(ip -4 addr show | awk '/inet/{print $2}' | grep -v 127.0.0.1 | cut -d/ -f1 | head -1)"
     info "OS           : $OS_ID $OS_VERSION_ID ($OS_FAMILY)"
+    info "Timezone     : $(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo 'unknown')"
+
+    SUM_OK=0; SUM_FAIL=0; SUM_SKIP=0
+
     echo
-    info "Installed: base tools + latest Node/Git/Python + opencode + claude-code"
-    info "Security : firewall ($FW_TOOL) + fail2ban + root lockdown + odin user"
-    info "Cloud    : telegram + wasabi + cloudflare-dns (if configured)"
+    echo -e "${MAG}── Core toolchain ──${NC}"
+    command -v mc       &>/dev/null && sum_pass "Midnight Commander"  "$(mc --version 2>/dev/null | head -1 | awk '{print $NF}')" || sum_fail "Midnight Commander"
+    command -v node     &>/dev/null && sum_pass "Node.js"             "$(node --version 2>/dev/null)" || sum_fail "Node.js"
+    command -v npm      &>/dev/null && sum_pass "npm"                 "$(npm --version 2>/dev/null)" || sum_fail "npm"
+    command -v git      &>/dev/null && sum_pass "Git"                 "$(git --version 2>/dev/null | awk '{print $3}')" || sum_fail "Git"
+    command -v python3  &>/dev/null && sum_pass "Python 3"            "$(python3 --version 2>/dev/null | awk '{print $2}')" || sum_fail "Python 3"
+    if command -v opencode &>/dev/null || [[ -x /root/.opencode/bin/opencode ]]; then
+        sum_pass "opencode" "$(/root/.opencode/bin/opencode --version 2>/dev/null || opencode --version 2>/dev/null || echo installed)"
+    else
+        sum_fail "opencode" "install failed"
+    fi
+    if command -v claude &>/dev/null; then
+        sum_pass "Claude Code" "$(claude --version 2>/dev/null | head -1)"
+    else
+        sum_fail "Claude Code" "install failed"
+    fi
+
     echo
-    log "Reboot recommended to apply all updates."
+    echo -e "${MAG}── Security ──${NC}"
+    _fw_active                                    && sum_pass "Firewall ($FW_TOOL)"  "active" || sum_fail "Firewall ($FW_TOOL)"  "inactive"
+    systemctl is-active --quiet fail2ban 2>/dev/null && sum_pass "Fail2Ban"          "running" || sum_fail "Fail2Ban"             "not running"
+    _ntp_active                                   && sum_pass "NTP / chrony"         "synced"  || sum_fail "NTP / chrony"         "inactive"
+    grep -q '^PermitRootLogin no' /etc/ssh/sshd_config 2>/dev/null \
+        && sum_pass "Root SSH"  "disabled" || sum_skip "Root SSH" "still enabled"
+
+    echo
+    echo -e "${MAG}── Optional integrations ──${NC}"
+    id odin &>/dev/null                           && sum_pass "User 'odin'"          "exists"  || sum_skip "User 'odin'"
+    [[ -x /usr/local/bin/telegram-notify ]]       && sum_pass "Telegram notifier"    "installed" || sum_skip "Telegram notifier"
+    [[ -f /root/.aws/credentials ]]               && sum_pass "Wasabi S3 credentials" "configured" || sum_skip "Wasabi S3 credentials"
+    [[ -f /etc/cron.daily/wasabi-autobackup ]]    && sum_pass "Wasabi daily backup"  "cron installed" || sum_skip "Wasabi daily backup"
+    [[ -x /usr/local/bin/cloudflare-dns ]]        && sum_pass "Cloudflare DDNS"      "installed" || sum_skip "Cloudflare DDNS"
+    [[ -f /etc/fail2ban/action.d/abuseipdb.conf ]] && sum_pass "AbuseIPDB reporting" "active" || sum_skip "AbuseIPDB reporting"
+
+    echo
+    echo -e "${MAG}── Summary ──${NC}"
+    echo -e "  ${GREEN}✓ ${SUM_OK} OK${NC}   ${RED}✗ ${SUM_FAIL} failed${NC}   ${YELLOW}- ${SUM_SKIP} skipped${NC}"
+    echo
+
+    if [[ $SUM_FAIL -gt 0 ]]; then
+        warn "Some required components failed. Review the log above before reboot."
+    else
+        log "All required components installed successfully."
+    fi
     echo
 }
 
