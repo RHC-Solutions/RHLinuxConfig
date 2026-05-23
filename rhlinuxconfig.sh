@@ -54,28 +54,33 @@ warn()  { echo -e "${YELLOW}[!]${NC}  $*"; _to_log "WARN" "$*"; }
 err()   { echo -e "${RED}[✗]${NC}  $*"; _to_log "ERR " "$*"; }
 info()  { echo -e "${CYAN}[i]${NC}  $*"; _to_log "INFO" "$*"; }
 header(){ echo -e "\n${MAG}══ $* ══${NC}"; printf '\n══ %s ══\n' "$*" >> "$LOGFILE"; }
-# Auto-yes timeout: prompts auto-accept "y" after this many seconds of inactivity.
-# Set AUTO_YES_TIMEOUT=0 to disable (wait forever for input).
+# Prompt timeouts (set any to 0 to wait forever):
+#   AUTO_YES_TIMEOUT   — safe [Y/n] prompts (default already yes, e.g. "change
+#                        root password?"). Short: hands-off completion.
+#   AUTO_NO_TIMEOUT    — opt-in [y/N] prompts (cloud setup, static IP, etc.).
+#                        Long: give the operator time to read the multi-line
+#                        intro and type 'y' if they actually want it.
+#   AUTO_TEXT_TIMEOUT  — text input prompts (IP address, gateway, etc.).
+#                        Short: fall through to the bracketed default.
 AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
+AUTO_NO_TIMEOUT="${AUTO_NO_TIMEOUT:-30}"
+AUTO_TEXT_TIMEOUT="${AUTO_TEXT_TIMEOUT:-5}"
 
 prompt(){
     local msg="$1"; shift
     local varname="${1:-}"
 
-    # Detect prompt type and default:
-    #   "[Y/n]" → confirmation, default YES → auto-answer "y"
-    #   "[y/N]" → confirmation, default NO  → auto-answer "n" (skip wizards)
-    #   "[y/n]" or "[Y/N]" → confirmation, no explicit default → default "n" (safer)
-    #   anything else with "[default]" → text input, auto-answer "" so the
-    #     caller's "${var:-fallback}" pattern picks up the bracketed default.
-    #
-    # Respecting the visible capitalization prevents the script from forcing
-    # destructive defaults (e.g. switching DHCP→static, opening firewall
-    # ports, attempting cloud integrations that need real credentials).
-    local is_confirm="" timeout_default=""
-    if   [[ "$msg" =~ \[Y/n\] ]]; then is_confirm=1; timeout_default="y"
-    elif [[ "$msg" =~ \[y/N\] ]]; then is_confirm=1; timeout_default="n"
-    elif [[ "$msg" =~ \[[YyNn]/[YyNn]\] ]]; then is_confirm=1; timeout_default="n"
+    # Detect prompt type, default answer, and timeout:
+    #   "[Y/n]" → confirmation, default YES → auto-answer "y" after 5s
+    #   "[y/N]" → confirmation, default NO  → auto-answer "n" after 30s
+    #     (long window so the operator can read a multi-line wizard intro
+    #     and opt in by typing 'y'; the previous 5s was too tight)
+    #   "[y/n]" or "[Y/N]" → no explicit default → "n" after 30s
+    #   anything else → text input, "" after 5s so "${var:-default}" wins
+    local is_confirm="" timeout_default="" timeout_secs="$AUTO_TEXT_TIMEOUT"
+    if   [[ "$msg" =~ \[Y/n\] ]]; then is_confirm=1; timeout_default="y"; timeout_secs="$AUTO_YES_TIMEOUT"
+    elif [[ "$msg" =~ \[y/N\] ]]; then is_confirm=1; timeout_default="n"; timeout_secs="$AUTO_NO_TIMEOUT"
+    elif [[ "$msg" =~ \[[YyNn]/[YyNn]\] ]]; then is_confirm=1; timeout_default="n"; timeout_secs="$AUTO_NO_TIMEOUT"
     fi
 
     # No terminal at all (piped + /dev/tty unavailable) → take defaults
@@ -85,16 +90,16 @@ prompt(){
         return 0
     fi
 
-    if [[ "$AUTO_YES_TIMEOUT" -gt 0 ]]; then
-        if read -rt "$AUTO_YES_TIMEOUT" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
+    if [[ "$timeout_secs" -gt 0 ]]; then
+        if read -rt "$timeout_secs" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
             return 0
         else
             # Timeout (or read error) — apply per-type default
             [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
             if [[ -n "$is_confirm" ]]; then
-                echo -e " ${YELLOW}${timeout_default}${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+                echo -e " ${YELLOW}${timeout_default}${NC} (auto after ${timeout_secs}s)"
             else
-                echo -e " ${YELLOW}<default>${NC} (auto after ${AUTO_YES_TIMEOUT}s)"
+                echo -e " ${YELLOW}<default>${NC} (auto after ${timeout_secs}s)"
             fi
             return 0
         fi
@@ -2036,6 +2041,7 @@ echo -e "${YELLOW}════════════════════�
 echo -e "${YELLOW}  Welcome to the RHLinuxConfig Setup Wizard!              ${NC}"
 echo -e "${YELLOW}  Detected: $OS_ID $OS_VERSION_ID ($OS_FAMILY)          ${NC}"
 echo -e "${YELLOW}  Press Enter to accept defaults shown in [brackets].     ${NC}"
+echo -e "${YELLOW}  Timeouts: [Y/n] → ${AUTO_YES_TIMEOUT}s · [y/N] → ${AUTO_NO_TIMEOUT}s · text → ${AUTO_TEXT_TIMEOUT}s  ${NC}"
 echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
 echo
 
