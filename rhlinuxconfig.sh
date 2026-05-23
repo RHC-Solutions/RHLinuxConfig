@@ -822,54 +822,67 @@ EOF
     return 1
 }
 
-# ── 5.5 Install pi.dev CLI ──────────────────────────────────────────────────
-do_install_pi() {
-    header "Installing pi.dev CLI"
-    if command -v pi &>/dev/null; then
-        log "pi already installed: $(pi --version 2>/dev/null || echo present)"
-        return 0
-    fi
+# ── 5.5 Install pi (Earendil pi-coding-agent, pi.dev) ───────────────────────
+_pi_present() { command -v pi &>/dev/null; }
 
-    # Safety: pi.dev is an unverified URL. Probe it first — only pipe to bash
-    # if the response looks like a shell script (starts with shebang or 'set').
-    # Hard 20s wall-clock cap so this step can never hang the whole run.
-    info "Probing pi.dev for a shell installer (max 20s)..."
-    local probe
-    probe=$(curl -fsSL --max-time 10 https://pi.dev 2>/dev/null | head -c 200 || true)
-    if [[ -z "$probe" ]]; then
-        warn "pi.dev did not respond — skipping."
-        return 1
-    fi
-    if ! echo "$probe" | head -1 | grep -qE '^(#!/|#!/usr/bin/env|set -[eu]|export )'; then
-        warn "pi.dev did not return a shell script (got: ${probe:0:60}...). Skipping."
-        return 1
-    fi
-
-    info "Running installer (curl pi.dev | bash, 60s timeout)..."
-    if timeout 60 bash -c 'curl -fsSL --max-time 30 https://pi.dev | bash' 2>&1 | tail -5; then
-        # Common install destinations for one-line bash installers
-        for d in /usr/local/bin /root/.local/bin /root/.pi/bin; do
-            [[ -x "$d/pi" ]] && export PATH="$d:$PATH"
-        done
-        if command -v pi &>/dev/null; then
-            log "pi installed: $(pi --version 2>/dev/null || echo ok)"
-            # Persist PATH for future shells if pi landed in a non-default location
-            cat > /etc/profile.d/pi.sh <<'EOF'
-for d in /root/.local/bin /root/.pi/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
+_write_pi_profile() {
+    cat > /etc/profile.d/pi.sh <<'EOF'
+for d in /root/.local/bin /root/.pi/bin /usr/local/share/npm-global/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
     if [[ -d "$d" && ":$PATH:" != *":$d:"* ]]; then
         export PATH="$d:$PATH"
     fi
 done
 EOF
-            chmod +x /etc/profile.d/pi.sh
-        else
-            warn "pi installer ran but 'pi' command not found in common locations."
-            return 1
-        fi
-    else
-        warn "pi installer failed — check network or visit https://pi.dev manually."
-        return 1
+    chmod +x /etc/profile.d/pi.sh
+}
+
+do_install_pi() {
+    header "Installing pi (Earendil pi-coding-agent)"
+    if _pi_present; then
+        log "pi already installed: $(pi --version 2>/dev/null || echo present)"
+        return 0
     fi
+
+    # Make any post-install PATHs discoverable for the rest of this script
+    export PATH="/root/.local/bin:/root/.pi/bin:/usr/local/share/npm-global/bin:$PATH"
+
+    # ── Method 1: official installer (pi.dev/install.sh) ───────────────────
+    info "Method 1/2: official installer (curl pi.dev/install.sh | sh)..."
+    if timeout 60 bash -c 'curl -fsSL --max-time 30 https://pi.dev/install.sh | sh' 2>&1 | tail -5; then
+        # Rescan common install paths now that the installer's run
+        for d in /usr/local/bin /root/.local/bin /root/.pi/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
+            [[ -x "$d/pi" ]] && export PATH="$d:$PATH"
+        done
+        if _pi_present; then
+            log "pi installed via official script: $(pi --version 2>/dev/null || echo ok)"
+            _write_pi_profile
+            return 0
+        fi
+    fi
+    warn "Official installer didn't produce a 'pi' binary — falling back to npm..."
+
+    # ── Method 2: npm package @earendil-works/pi-coding-agent ──────────────
+    if command -v npm &>/dev/null; then
+        info "Method 2/2: npm install -g --ignore-scripts @earendil-works/pi-coding-agent..."
+        mkdir -p /usr/local/share/npm-global
+        npm config set prefix /usr/local/share/npm-global 2>/dev/null || true
+        export PATH="/usr/local/share/npm-global/bin:$PATH"
+        if npm install -g --ignore-scripts --unsafe-perm=true @earendil-works/pi-coding-agent 2>&1 | tail -3; then
+            if _pi_present; then
+                log "pi installed via npm: $(pi --version 2>/dev/null || echo ok)"
+                _write_pi_profile
+                return 0
+            fi
+        fi
+        warn "npm install of @earendil-works/pi-coding-agent failed."
+    else
+        warn "npm not available for fallback."
+    fi
+
+    warn "Both pi install methods failed. Install manually later:"
+    warn "  curl -fsSL https://pi.dev/install.sh | sh"
+    warn "  npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
+    return 1
 }
 
 # ── 6. Install Claude Code ──────────────────────────────────────────────────
