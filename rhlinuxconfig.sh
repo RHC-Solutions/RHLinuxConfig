@@ -1320,6 +1320,47 @@ post_notify() {
     fi
 }
 
+# ── Auto-reboot with countdown ──────────────────────────────────────────────
+auto_reboot() {
+    header "Reboot Required"
+    info "Setup finished successfully — a reboot is recommended to apply"
+    info "kernel updates, group memberships, and PATH changes."
+    echo
+    echo "  [Y] or [Enter]  →  reboot now"
+    echo "  [N]             →  skip and reboot later (sudo reboot)"
+    echo
+
+    local countdown=30 key=""
+    while (( countdown > 0 )); do
+        printf "\r  ${YELLOW}Auto-reboot in %2ds${NC}  ·  press [Y/n]: " "$countdown"
+        if read -rsn1 -t 1 key 2>/dev/null; then
+            echo
+            case "$key" in
+                ""|y|Y)
+                    log "Rebooting now..."
+                    sleep 1
+                    systemctl reboot 2>/dev/null || reboot
+                    exit 0 ;;
+                n|N)
+                    log "Reboot skipped. Run 'sudo reboot' when ready."
+                    return 0 ;;
+                *)
+                    # Unknown key — keep counting down
+                    ;;
+            esac
+        fi
+        countdown=$((countdown - 1))
+    done
+
+    echo
+    log "No input — rebooting now..."
+    if command -v telegram-notify &>/dev/null; then
+        telegram-notify info "Auto-reboot triggered on $(hostname)" || true
+    fi
+    sleep 1
+    systemctl reboot 2>/dev/null || reboot
+}
+
 # ── Final summary ───────────────────────────────────────────────────────────
 show_summary() {
     echo
@@ -1379,6 +1420,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     setup_firewall
     setup_fail2ban
     show_summary
+    auto_reboot
     exit 0
 fi
 
@@ -1408,3 +1450,4 @@ setup_firewall
 setup_fail2ban
 post_notify
 show_summary
+auto_reboot
