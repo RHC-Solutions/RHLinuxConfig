@@ -802,6 +802,41 @@ EOF
     return 1
 }
 
+# ── 5.5 Install pi.dev CLI ──────────────────────────────────────────────────
+do_install_pi() {
+    header "Installing pi.dev CLI"
+    if command -v pi &>/dev/null; then
+        log "pi already installed: $(pi --version 2>/dev/null || echo present)"
+        return 0
+    fi
+
+    info "Running official installer (curl pi.dev | bash)..."
+    if curl -fsSL https://pi.dev 2>/dev/null | bash 2>&1 | tail -5; then
+        # Common install destinations for one-line bash installers
+        for d in /usr/local/bin /root/.local/bin /root/.pi/bin; do
+            [[ -x "$d/pi" ]] && export PATH="$d:$PATH"
+        done
+        if command -v pi &>/dev/null; then
+            log "pi installed: $(pi --version 2>/dev/null || echo ok)"
+            # Persist PATH for future shells if pi landed in a non-default location
+            cat > /etc/profile.d/pi.sh <<'EOF'
+for d in /root/.local/bin /root/.pi/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
+    if [[ -d "$d" && ":$PATH:" != *":$d:"* ]]; then
+        export PATH="$d:$PATH"
+    fi
+done
+EOF
+            chmod +x /etc/profile.d/pi.sh
+        else
+            warn "pi installer ran but 'pi' command not found in common locations."
+            return 1
+        fi
+    else
+        warn "pi installer failed — check network or visit https://pi.dev manually."
+        return 1
+    fi
+}
+
 # ── 6. Install Claude Code ──────────────────────────────────────────────────
 do_install_claude() {
     header "Installing Claude Code"
@@ -1664,6 +1699,11 @@ show_summary() {
     else
         sum_fail "Claude Code" "install failed"
     fi
+    if command -v pi &>/dev/null; then
+        sum_pass "pi (pi.dev)" "$(pi --version 2>/dev/null | head -1 || echo ok)"
+    else
+        sum_skip "pi (pi.dev)"
+    fi
 
     echo
     echo -e "${MAG}── Network test tools ──${NC}"
@@ -1778,6 +1818,7 @@ Git               : $(_v_or git --version | awk '{print $3}')
 Python 3          : $(_v_or python3 --version | awk '{print $2}')
 opencode          : $(if command -v opencode &>/dev/null; then opencode --version 2>/dev/null | head -1; elif [[ -x /root/.opencode/bin/opencode ]]; then /root/.opencode/bin/opencode --version 2>/dev/null | head -1; else echo "not installed"; fi)
 Claude Code       : $(_v_or claude --version | head -1)
+pi (pi.dev)       : $(if command -v pi &>/dev/null; then pi --version 2>/dev/null | head -1 || echo installed; else echo "not installed"; fi)
 Ookla speedtest   : $(if command -v speedtest &>/dev/null && speedtest --version 2>/dev/null | grep -qi 'Speedtest by Ookla'; then speedtest --version | head -1; else echo "not installed"; fi)
 netperf           : $(_check "" command -v netperf | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
 iperf3            : $(_check "" command -v iperf3 | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
@@ -1904,6 +1945,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_install_speedtest
     do_install_latest
     do_install_opencode
+    do_install_pi
     do_install_claude
     setup_firewall
     setup_fail2ban
