@@ -554,6 +554,84 @@ EOF
     log "mc defaults installed at /etc/profile.d/mc.sh (EDITOR=mcedit, mouse on)"
 }
 
+# ── 4.6 Install Extended Sysadmin / Network Toolkit (best-effort) ───────────
+# Packages requested: man perl vim nano atop nmon traceroute telnet lynx mlocate
+# iptraf-ng nload bmon tcptrack vnstat cbm speedometer pktstat ifstat ntopng
+# darkstat slurm  + cross-distro names for nc, snmp, man.
+# Missing packages on a given distro are silently skipped (logged), so this
+# step never aborts the run on obscure tools.
+EXTRAS_OK=0; EXTRAS_FAIL=0
+EXTRAS_FAILED_LIST=""
+
+_install_one_best_effort() {
+    local pkg="$1"
+    case "$OS_FAMILY" in
+        debian)
+            # Pre-check that the package exists in the index
+            if apt-cache show "$pkg" &>/dev/null; then
+                wait_for_apt_lock
+                if $PKG_INSTALL "$pkg" &>/dev/null; then
+                    EXTRAS_OK=$((EXTRAS_OK + 1))
+                else
+                    EXTRAS_FAIL=$((EXTRAS_FAIL + 1)); EXTRAS_FAILED_LIST+=" $pkg"
+                fi
+            else
+                EXTRAS_FAIL=$((EXTRAS_FAIL + 1)); EXTRAS_FAILED_LIST+=" $pkg(unavailable)"
+            fi
+            ;;
+        rhel|arch|suse)
+            if $PKG_INSTALL "$pkg" &>/dev/null; then
+                EXTRAS_OK=$((EXTRAS_OK + 1))
+            else
+                EXTRAS_FAIL=$((EXTRAS_FAIL + 1)); EXTRAS_FAILED_LIST+=" $pkg"
+            fi
+            ;;
+    esac
+}
+
+do_install_extras() {
+    header "Installing Extended Toolkit"
+
+    # Common — names that are identical across all four families
+    local extras="perl vim nano atop nmon traceroute telnet lynx mlocate nload bmon tcptrack vnstat ifstat darkstat"
+
+    # Per-family additions / name remaps
+    case "$OS_FAMILY" in
+        debian)
+            extras="$extras man-db netcat-openbsd iptraf-ng snmp ntopng pktstat cbm speedometer slurm-tools gzip"
+            ;;
+        rhel)
+            extras="$extras man nmap-ncat iptraf-ng net-snmp net-snmp-utils ntopng pktstat cbm gzip"
+            # EPEL provides most of the niche tools — already enabled earlier
+            ;;
+        arch)
+            extras="$extras man-db gnu-netcat iptraf-ng net-snmp ntopng pktstat cbm slurm gzip"
+            ;;
+        suse)
+            extras="$extras man netcat-openbsd iptraf-ng net-snmp ntopng gzip"
+            ;;
+    esac
+
+    EXTRAS_OK=0; EXTRAS_FAIL=0; EXTRAS_FAILED_LIST=""
+    info "Trying $(echo "$extras" | wc -w) packages (missing ones will be skipped)..."
+
+    local pkg
+    for pkg in $extras; do
+        # Skip if already installed
+        if $PKG_CHECK "$pkg" &>/dev/null 2>&1; then
+            EXTRAS_OK=$((EXTRAS_OK + 1))
+            continue
+        fi
+        _install_one_best_effort "$pkg"
+    done
+
+    log "Extended toolkit: ${GREEN}${EXTRAS_OK} installed${NC}, ${YELLOW}${EXTRAS_FAIL} unavailable/failed${NC}."
+    [[ -n "$EXTRAS_FAILED_LIST" ]] && info "Not installed:$EXTRAS_FAILED_LIST"
+
+    # mlocate ships /etc/cron.daily/mlocate; trigger an initial DB build
+    command -v updatedb &>/dev/null && updatedb &>/dev/null &
+}
+
 # ── 5. Install opencode ─────────────────────────────────────────────────────
 _opencode_present() {
     command -v opencode &>/dev/null || [[ -x /root/.opencode/bin/opencode ]]
@@ -1548,6 +1626,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_update
     do_install
     do_install_mc
+    do_install_extras
     do_install_latest
     log "Quick mode done."
     exit 0
@@ -1558,6 +1637,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_update
     do_install
     do_install_mc
+    do_install_extras
     do_install_latest
     do_install_opencode
     do_install_claude
@@ -1579,6 +1659,7 @@ echo
 do_update
 do_install
 do_install_mc
+do_install_extras
 do_install_latest
 do_install_opencode
 do_install_claude
