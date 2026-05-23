@@ -555,10 +555,19 @@ EOF
 }
 
 # ── 5. Install opencode ─────────────────────────────────────────────────────
+_opencode_present() {
+    command -v opencode &>/dev/null || [[ -x /root/.opencode/bin/opencode ]]
+}
+_opencode_version() {
+    /root/.opencode/bin/opencode --version 2>/dev/null \
+        || opencode --version 2>/dev/null \
+        || echo "ok"
+}
+
 do_install_opencode() {
     header "Installing opencode"
-    if command -v opencode &>/dev/null; then
-        log "opencode already installed: $(opencode --version 2>/dev/null || echo 'present')"
+    if _opencode_present; then
+        log "opencode already installed: $(_opencode_version)"
         return 0
     fi
 
@@ -570,28 +579,63 @@ fi
 if [[ -d "$HOME/.opencode/bin" && ":$PATH:" != *":$HOME/.opencode/bin:"* ]]; then
     export PATH="$HOME/.opencode/bin:$PATH"
 fi
+if [[ -d /usr/local/share/npm-global/bin && ":$PATH:" != *":/usr/local/share/npm-global/bin:"* ]]; then
+    export PATH="/usr/local/share/npm-global/bin:$PATH"
+fi
 EOF
     chmod +x /etc/profile.d/opencode.sh
+    export PATH="/root/.opencode/bin:/usr/local/share/npm-global/bin:$PATH"
 
-    info "Installing opencode via official installer (opencode.ai/install)..."
-    if curl -fsSL https://opencode.ai/install | bash 2>&1 | tail -5; then
-        # Make the binary visible to the current script process too
-        export PATH="/root/.opencode/bin:$PATH"
-        if command -v opencode &>/dev/null || [[ -x /root/.opencode/bin/opencode ]]; then
-            log "opencode installed: $(/root/.opencode/bin/opencode --version 2>/dev/null || opencode --version 2>/dev/null || echo 'ok')"
-        else
-            warn "Official installer finished but 'opencode' not found in /root/.opencode/bin."
-            return 1
+    # ── Method 1: official installer ────────────────────────────────────────
+    info "Method 1/3: official installer (opencode.ai/install)..."
+    if curl -fsSL https://opencode.ai/install 2>/dev/null | bash 2>&1 | tail -3; then
+        if _opencode_present; then
+            log "opencode installed via official script: $(_opencode_version)"
+            return 0
         fi
-    else
-        warn "opencode installer failed — check network / TLS / DNS."
-        return 1
+    fi
+    warn "Official installer did not produce a binary — trying npm..."
+
+    # ── Method 2: npm (correct package name is 'opencode-ai', unscoped) ─────
+    if command -v npm &>/dev/null; then
+        info "Method 2/3: npm install -g opencode-ai ..."
+        mkdir -p /usr/local/share/npm-global
+        npm config set prefix /usr/local/share/npm-global 2>/dev/null || true
+        if npm install -g --unsafe-perm=true opencode-ai 2>&1 | tail -3; then
+            if _opencode_present; then
+                log "opencode installed via npm: $(_opencode_version)"
+                return 0
+            fi
+        fi
+        warn "npm install failed — falling back to GitHub release..."
     fi
 
-    if ! grep -q "opencode" /root/.bashrc 2>/dev/null; then
-        echo 'export PATH="$HOME/.opencode/bin:$PATH"' >> /root/.bashrc
+    # ── Method 3: GitHub release binary ─────────────────────────────────────
+    local rel_asset rel_url
+    case "$ARCH" in
+        x86_64|amd64)  rel_asset="opencode-linux-x64.zip" ;;
+        aarch64|arm64) rel_asset="opencode-linux-arm64.zip" ;;
+        *) warn "No prebuilt opencode binary for $ARCH."; return 1 ;;
+    esac
+    info "Method 3/3: GitHub releases ($rel_asset)..."
+    rel_url=$(curl -fsSL "https://api.github.com/repos/sst/opencode/releases/latest" 2>/dev/null \
+        | grep -oE "https://github.com/sst/opencode/releases/download/[^\"]+${rel_asset}" | head -1)
+    if [[ -n "$rel_url" ]]; then
+        mkdir -p /root/.opencode/bin
+        if curl -fsSL "$rel_url" -o /tmp/opencode.zip \
+            && unzip -qo /tmp/opencode.zip -d /root/.opencode/bin \
+            && chmod +x /root/.opencode/bin/opencode \
+            && rm -f /tmp/opencode.zip; then
+            if _opencode_present; then
+                log "opencode installed from GitHub release: $(_opencode_version)"
+                return 0
+            fi
+        fi
     fi
-    log "opencode PATH configured in /etc/profile.d/opencode.sh"
+
+    warn "All three opencode install methods failed."
+    warn "Install manually later:  curl -fsSL https://opencode.ai/install | bash"
+    return 1
 }
 
 # ── 6. Install Claude Code ──────────────────────────────────────────────────
