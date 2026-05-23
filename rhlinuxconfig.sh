@@ -218,6 +218,39 @@ resolve_pkg_list() {
 # DISTRO-ADAPTED FUNCTIONS
 # ═════════════════════════════════════════════════════════════════════════════
 
+# ── Helper: wait for apt/dpkg locks (Ubuntu unattended-upgrades) ────────────
+wait_for_apt_lock() {
+    [[ "$OS_FAMILY" != "debian" ]] && return 0
+    local locks=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
+    local waited=0 max_wait=600  # 10 minutes
+    local pid holder=""
+
+    while :; do
+        local busy=0
+        for lock in "${locks[@]}"; do
+            [[ -e "$lock" ]] || continue
+            if pid=$(fuser "$lock" 2>/dev/null | tr -d ' '); then
+                [[ -n "$pid" ]] && { busy=1; holder="$(ps -p "$pid" -o comm= 2>/dev/null || echo pid=$pid)"; break; }
+            fi
+        done
+        [[ $busy -eq 0 ]] && return 0
+
+        if [[ $waited -eq 0 ]]; then
+            warn "apt/dpkg is locked by '$holder' — waiting (Ctrl-C to abort)..."
+        elif (( waited % 20 == 0 )); then
+            info "Still waiting on '$holder' (${waited}s elapsed)..."
+        fi
+
+        if (( waited >= max_wait )); then
+            err "apt lock held for ${max_wait}s by '$holder'. Aborting."
+            err "Stop it manually: sudo systemctl stop unattended-upgrades; sudo kill $pid"
+            exit 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+}
+
 # ── Helper: generate random password ────────────────────────────────────────
 gen_pass() {
     tr -dc 'A-Za-z0-9_!@#%^&*()' < /dev/urandom 2>/dev/null | head -c 20
@@ -358,10 +391,13 @@ show_info() {
 # ── 2. Full Update & Upgrade ────────────────────────────────────────────────
 do_update() {
     header "System Update"
+    wait_for_apt_lock
     info "Using $PKG_MGR — updating package lists..."
     eval "$PKG_UPDATE"
+    wait_for_apt_lock
     info "Upgrading packages..."
     eval "$PKG_UPGRADE"
+    wait_for_apt_lock
     eval "$PKG_AUTOREMOVE" 2>/dev/null || true
     log "System is up to date."
 }
@@ -376,6 +412,7 @@ pkg_install() {
                 $PKG_CHECK "$pkg" &>/dev/null || missing+=("$pkg")
             done
             [[ ${#missing[@]} -eq 0 ]] && return 0
+            wait_for_apt_lock
             $PKG_INSTALL "${missing[@]}" ;;
         rhel)
             local missing=()
@@ -1304,13 +1341,14 @@ show_summary() {
 
 echo -e "${CYAN}"
 cat << "EOF"
-    ____  __    _     __     _     __
-   / _ \/ /   / /    / /    (_)___/ /__  ___
-  / , _/ /__ / _ \  / _ \  / / __/ / _ \/ _ \
- /_/|_/____//_.__/ /_.__/ /_/\__/_/\___/ .__/
-                                        /_/
+ ____  _   _  ____    ____        _       _   _
+|  _ \| | | |/ ___|  / ___|  ___ | |_   _| |_(_) ___  _ __  ___
+| |_) | |_| | |      \___ \ / _ \| | | | | __| |/ _ \| '_ \/ __|
+|  _ <|  _  | |___    ___) | (_) | | |_| | |_| | (_) | | | \__ \
+|_| \_\_| |_|\____|  |____/ \___/|_|\__,_|\__|_|\___/|_| |_|___/
 EOF
 echo -e "${NC}"
+echo "  RHC Solutions  ·  rhcsolutions.com  ·  t.me/rhcsolutions"
 echo "  RHLinuxConfig — Universal Linux Setup & Hardening Wizard"
 echo "  $(date)"
 echo
