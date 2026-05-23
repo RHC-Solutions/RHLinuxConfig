@@ -91,7 +91,11 @@ prompt(){
     fi
 
     if [[ "$timeout_secs" -gt 0 ]]; then
-        if read -rt "$timeout_secs" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@" 2>/dev/null; then
+        # NB: do NOT redirect stderr here. 'read -p PROMPT' writes the prompt
+        # text to stderr; suppressing it makes every prompt invisible (you
+        # only see the answer/timeout result, not the question). That was
+        # masking the entire interactive UX.
+        if read -rt "$timeout_secs" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@"; then
             return 0
         else
             # Timeout (or read error) — apply per-type default
