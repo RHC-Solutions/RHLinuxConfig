@@ -1,67 +1,188 @@
 # RHLinuxConfig
 
-Universal Linux server setup & hardening wizard supporting **AlmaLinux, Rocky, CentOS, Debian, Ubuntu, Arch Linux, Linux Mint, and SUSE**.
+Universal Linux server setup & hardening wizard. One script, every major distro — automatically detects your OS, sets timezone from your public IP, installs a curated toolchain, hardens the system, and wires up optional cloud integrations (Telegram, Wasabi, Cloudflare).
 
-## Quick Start
+Supports **AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Linux Mint, Arch, Manjaro, openSUSE, SLES**.
+
+---
+
+## Installation
+
+One command. Run as root on a fresh server:
 
 ```bash
-sudo bash rhlinuxconfig.sh                   # Full interactive wizard
-sudo bash rhlinuxconfig.sh --quick           # Info + update + base tools only
-sudo bash rhlinuxconfig.sh --unattended      # Full setup with no prompts
+curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh | sudo bash
 ```
+
+Add `--quick` or `--unattended` (see [Run Modes](#run-modes)):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rhlinuxconfig.sh | sudo bash -s -- --unattended
+```
+
+---
+
+## Run Modes
+
+| Command | What it runs |
+|---------|--------------|
+| `sudo ./rhlinuxconfig.sh` | **Full interactive wizard** — everything, with prompts for cloud integrations |
+| `sudo ./rhlinuxconfig.sh --quick` | Info + update + base tools + `mc` + Node/Git/Python only (no prompts) |
+| `sudo ./rhlinuxconfig.sh --unattended` | Everything **except** wizards (no static IP, no users, no cloud) |
+
+`--unattended` is safe for CI / image-baking. `--quick` is the fastest "fresh box → usable shell" path.
+
+---
 
 ## Supported Distros
 
-| Family | Distros |
-|--------|---------|
-| **Debian** | Ubuntu, Debian, Linux Mint (uses `apt`) |
-| **RHEL** | AlmaLinux, Rocky Linux, CentOS, RHEL (uses `dnf` + EPEL) |
-| **Arch** | Arch Linux, Manjaro, EndeavourOS (uses `pacman`) |
-| **SUSE** | openSUSE, SLES (uses `zypper`) |
+| Family | Distros | Package mgr | Firewall | Sudo group |
+| ------ | ------- | :---------: | :------: | :--------: |
+| **Debian** | Ubuntu, Debian, Linux Mint | `apt` | UFW | `sudo` |
+| **RHEL** | AlmaLinux, Rocky, CentOS, RHEL, Fedora, Oracle | `dnf` + EPEL | firewalld | `wheel` |
+| **Arch** | Arch, Manjaro, EndeavourOS, Garuda | `pacman` | UFW | `wheel` |
+| **SUSE** | openSUSE, SLES | `zypper` | firewalld | `wheel` |
 
-Auto-detects your OS and adapts package names, firewall, network config, and defaults.
+Detection falls back to `ID_LIKE` for unknown derivatives. All package names, network-config files, and firewall commands adapt automatically.
 
-## Wizard Steps
+---
 
-| Step | Description |
-|------|-------------|
-| **1. Detect** | Identifies OS family, sets package manager & distro-specific variables |
-| **2. Info** | Displays OS, kernel, CPU, RAM, disk, network interfaces, public IP |
-| **3. Update** | Distro-native update (`apt`, `dnf`, `pacman -Syu`, or `zypper`) |
-| **4. Tools** | curl, wget, htop, mc, ncdu, btop, iftop, iotop, nethogs, sysstat, dstat, iperf3, smartmontools, screen, tmux, jq, rsync, git, build tools, firewall, fail2ban |
-| **5. Latest** | **Node.js** (NodeSource — works on all distros), **Git** (PPA on Debian, otherwise distro), **Python** (deadsnakes on Debian, EPEL on RHEL, distro on Arch/SUSE) |
-| **6. opencode** | Installs `@opencode-ai/opencode` globally via npm, PATH in `/etc/profile.d/` |
-| **7. Claude Code** | Installs `@anthropic-ai/claude-code` via npm, PATH config |
-| **8. Static IP** | **Debian**: netplan or `/etc/network/interfaces` · **RHEL**: `/etc/sysconfig/network-scripts/ifcfg-*` · **Arch**: systemd-networkd · **SUSE**: `/etc/sysconfig/network/ifcfg-*` |
-| **9. Root** | Change root password, disable root SSH login |
-| **10. odin User** | Creates `odin` with passwordless sudo + `$DEV_GROUP`, generates & shows password |
-| **11. Telegram** | Bot token + Chat ID, validates token, sends test message |
-| **12. Wasabi S3** | Credentials + bucket, validates connection, `wasabi-backup` helper |
-| **13. Auto-Backup** | Daily `cron.daily` backup of `/home`, `/etc`, `/root`, `/var/log`, `/var/www` to Wasabi via `aws s3 sync` |
-| **14. Cloudflare DNS** | API token + zone + record name, validates token, creates `cloudflare-dns` updater, optional hourly cron |
-| **15. Firewall** | **Debian/Arch**: UFW · **RHEL/SUSE**: firewalld |
-| **16. Fail2Ban** | SSH, SSH-DDoS, firewall jails + optional AbuseIPDB |
+## What the Script Does
 
-## Post-Install Helpers
+### Automatic (every mode)
+| # | Step | Detail |
+|---|------|--------|
+| 0 | **Detect distro** | Family, version, package manager, firewall tool, sudo group |
+| 1 | **Auto-locate** | Queries `ipinfo.io` → sets timezone via `timedatectl`, enables chrony / systemd-timesyncd, immediate `chronyc makestep` |
+| 2 | **System info** | Hostname, OS, kernel, CPU, RAM, disks, NICs, public IP, DNS |
+
+### Install phase
+| # | Step | Detail |
+|---|------|--------|
+| 3 | **Full upgrade** | `apt`, `dnf`, `pacman -Syu`, or `zypper` — with autoremove |
+| 4 | **Base tools** | `curl wget htop ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr screen tmux unzip zip gpg jq tree rsync` + build essentials + `lm-sensors` + `fail2ban` + firewall pkg |
+| 5 | **Midnight Commander** | Installs `mc`, sets `mcedit` as `$EDITOR` system-wide via `/etc/profile.d/mc.sh`, registers with `update-alternatives` |
+| 6 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL |
+| 7 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh` |
+| 8 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh` |
+
+### Interactive wizards (full mode only)
+| # | Step | Detail |
+|---|------|--------|
+| 9 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
+| 10 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
+| 11 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
+| 12 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
+| 13 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
+| 14 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
+| 15 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
+| 16 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
+| 17 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
+
+---
+
+## Post-Install Commands
+
+After the script finishes, these helpers are on `$PATH`:
 
 ```bash
-# Send a Telegram alert
-telegram-notify info "Server is online"
-telegram-notify alert "CPU > 90%"
+# Telegram alerts
+telegram-notify info  "Server online"
+telegram-notify alert "Disk > 90%"
+echo "$something" | telegram-notify warn       # stdin works too
 
-# Manual backup to Wasabi
-wasabi-backup /var/www
-wasabi-backup /etc configs
+# Wasabi S3 backups
+wasabi-backup /var/www                          # one-shot
+wasabi-backup /etc configs                      # with prefix
+/usr/local/bin/wasabi-autobackup                # run the daily job manually
 
-# Run the auto-backup
-/usr/local/bin/wasabi-autobackup
+# Cloudflare DDNS
+cloudflare-dns                                  # auto-detect public IP
+cloudflare-dns --ip 203.0.113.10                # specify IP
 
-# Update Cloudflare DNS A record to current IP
-cloudflare-dns
-cloudflare-dns --ip 203.0.113.10    # specify IP manually
+# Midnight Commander
+mc                                              # mouse + xterm enabled via alias
+mcedit /etc/hosts                               # default $EDITOR after install
 ```
+
+---
+
+## File Layout (where things land)
+
+```
+/usr/local/bin/telegram-notify        # Telegram helper
+/usr/local/bin/wasabi-backup          # Manual S3 upload
+/usr/local/bin/wasabi-autobackup      # Daily backup runner
+/usr/local/bin/cloudflare-dns         # DDNS updater
+
+/etc/profile.d/mc.sh                  # EDITOR=mcedit, mc aliases
+/etc/profile.d/opencode.sh            # opencode PATH
+/etc/profile.d/claude-code.sh         # claude PATH
+/etc/profile.d/wasabi.sh              # WASABI_BUCKET / WASABI_REGION
+/etc/profile.d/cloudflare.sh          # CF_TOKEN / CF_ZONE / CF_NAME / CF_TTL / CF_PROXIED
+
+/etc/cron.daily/wasabi-autobackup     # Backup cron
+/etc/cron.hourly/cloudflare-dns       # DDNS cron
+
+/etc/fail2ban/jail.local              # SSH + firewall jails
+/etc/fail2ban/action.d/abuseipdb.conf # (if AbuseIPDB key given)
+
+/etc/sudoers.d/odin                   # odin = passwordless sudo
+/root/.aws/credentials                # Wasabi keys (chmod 600)
+/var/log/wasabi-backup.log            # Daily backup log
+```
+
+---
 
 ## Requirements
 
-- **Any**: AlmaLinux 8+, Rocky 8+, CentOS 7+, Debian 11+, Ubuntu 20.04+, Arch, Mint 21+, openSUSE 15+
-- Run as `root` or with `sudo`
+- **OS**: AlmaLinux 8+, Rocky 8+, CentOS 7+, RHEL 7+, Debian 11+, Ubuntu 20.04+, Mint 21+, openSUSE 15+, Arch (any current)
+- **Privileges**: must run as `root` (or via `sudo`)
+- **Network**: internet access for package mirrors, ipinfo.io, NodeSource, npm, NTP
+- **Optional accounts**: Telegram bot, Wasabi S3, Cloudflare API token, AbuseIPDB API key
+
+---
+
+## Customizing / Extending
+
+The script is a single Bash file — read top-to-bottom, all functions are commented. Key extension points:
+
+- **Add a package to the base install** → append to `PACKAGES_CORE` near the top of the script
+- **Change firewall ports prompted** → edit the loop in `setup_firewall()`
+- **Skip a wizard step** → comment out the corresponding line in the `# Wizard: Interactive Setup` block at the bottom
+- **Add a custom step** → write a `setup_foo()` function and call it from the main flow
+
+Distro-specific behavior lives in `case "$OS_FAMILY"` blocks — add a new arm (e.g. `gentoo`) and the rest of the script picks it up.
+
+---
+
+## Troubleshooting
+
+| Symptom | Try |
+|---------|-----|
+| ipinfo.io step warns "unreachable" | Check outbound HTTPS / DNS. Script continues; set timezone manually with `timedatectl set-timezone Europe/Berlin` |
+| `claude` not in `$PATH` after install | `source /etc/profile.d/claude-code.sh` or open a new shell |
+| Locked out via UFW after enabling | Boot single-user, `ufw allow ssh && ufw reload` |
+| Telegram test message fails | Token from `@BotFather` correct? Did you `/start` the bot in a DM first to get the chat ID? |
+| Wasabi backup says bucket inaccessible | Check region — endpoint is `s3.<region>.wasabisys.com`, default is `us-east-1` |
+| Cloudflare DDNS "Update failed" | Token needs **DNS:Edit** for the specific zone, not just account-level |
+
+Logs:
+- Wasabi daily backup → `/var/log/wasabi-backup.log`
+- Fail2Ban → `journalctl -u fail2ban`
+- Cloudflare cron → `journalctl -t CRON | grep cloudflare`
+
+---
+
+## Safety Notes
+
+- The script **changes the root password** if you accept the prompt — write it down (or copy the generated `odin` password) before logging out.
+- `wizard_static_ip` rewrites network config files; you can lose connectivity if the IP/gateway is wrong. Have console access ready.
+- `--unattended` skips wizards but **does** enable firewall + fail2ban. SSH stays open; nothing else.
+- Generated passwords are printed once to the terminal and not stored anywhere. Capture them at the time.
+
+---
+
+## License
+
+MIT.
