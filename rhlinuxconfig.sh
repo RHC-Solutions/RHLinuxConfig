@@ -20,11 +20,26 @@ export APT_LISTCHANGES_FRONTEND=none
 # ── Colors ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; MAG='\033[0;35m'; NC='\033[0m'
 
-log()   { echo -e "${GREEN}[✓]${NC}  $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC}  $*"; }
-err()   { echo -e "${RED}[✗]${NC}  $*"; }
-info()  { echo -e "${CYAN}[i]${NC}  $*"; }
-header(){ echo -e "\n${MAG}══ $* ══${NC}"; }
+# ── Logging to file ────────────────────────────────────────────────────────
+# Live event log (every log/warn/err/info/header line); a separate detailed
+# summary is written at the end by write_detailed_summary().
+RUN_TS="$(date +%Y%m%d-%H%M%S)"
+LOGFILE="/var/log/rhlinuxconfig-${RUN_TS}.log"
+SUMMARY_FILE="/var/log/rhlinuxconfig-summary-${RUN_TS}.txt"
+mkdir -p /var/log 2>/dev/null || true
+if ! touch "$LOGFILE" 2>/dev/null; then
+    LOGFILE="/tmp/rhlinuxconfig-${RUN_TS}.log"
+    SUMMARY_FILE="/tmp/rhlinuxconfig-summary-${RUN_TS}.txt"
+    touch "$LOGFILE"
+fi
+# Strip ANSI escapes before writing to the file
+_to_log() { local lvl="$1"; shift; printf '[%s] %s %s\n' "$lvl" "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGFILE"; }
+
+log()   { echo -e "${GREEN}[✓]${NC}  $*"; _to_log "OK  " "$*"; }
+warn()  { echo -e "${YELLOW}[!]${NC}  $*"; _to_log "WARN" "$*"; }
+err()   { echo -e "${RED}[✗]${NC}  $*"; _to_log "ERR " "$*"; }
+info()  { echo -e "${CYAN}[i]${NC}  $*"; _to_log "INFO" "$*"; }
+header(){ echo -e "\n${MAG}══ $* ══${NC}"; printf '\n══ %s ══\n' "$*" >> "$LOGFILE"; }
 # Auto-yes timeout: prompts auto-accept "y" after this many seconds of inactivity.
 # Set AUTO_YES_TIMEOUT=0 to disable (wait forever for input).
 AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
@@ -1661,7 +1676,158 @@ show_summary() {
     else
         log "All required components installed successfully."
     fi
+
+    write_detailed_summary
+
+    info "Live log     : $LOGFILE"
+    info "Full summary : $SUMMARY_FILE"
     echo
+}
+
+# ── Detailed plain-text summary file ────────────────────────────────────────
+_st()    { command "$@" 2>/dev/null || echo "n/a"; }   # safe try
+_v_or()  { local val; val="$(_st "$@")"; [[ -n "$val" ]] && echo "$val" || echo "n/a"; }
+_check() {
+    # _check "Label" cmd args... -> "Label .......... yes|no"
+    local label="$1"; shift
+    if "$@" &>/dev/null; then echo "$label: yes"; else echo "$label: no"; fi
+}
+
+write_detailed_summary() {
+    local pub_ip local_ip tz fw_state fail2ban_state ntp_state
+    pub_ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || echo unknown)
+    local_ip=$(ip -4 addr show | awk '/inet/ && $2!~/^127/{print $2; exit}' | cut -d/ -f1)
+    tz=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo unknown)
+    case "$FW_TOOL" in
+        ufw)       fw_state=$(ufw status 2>/dev/null | head -1 | awk -F: '{print $2}' | xargs || echo unknown) ;;
+        firewalld) systemctl is-active --quiet firewalld && fw_state=active || fw_state=inactive ;;
+        *)         fw_state=unknown ;;
+    esac
+    systemctl is-active --quiet fail2ban 2>/dev/null && fail2ban_state=running || fail2ban_state="not running"
+    if systemctl is-active --quiet chronyd 2>/dev/null || systemctl is-active --quiet chrony 2>/dev/null; then
+        ntp_state="chrony active"
+    elif systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        ntp_state="systemd-timesyncd active"
+    else
+        ntp_state="inactive"
+    fi
+
+    {
+    cat <<HEADER
+================================================================================
+RHLinuxConfig — Detailed Setup Summary
+RHC Solutions  ·  rhcsolutions.com  ·  t.me/rhcsolutions
+================================================================================
+Run timestamp     : $(date '+%Y-%m-%d %H:%M:%S %Z')
+Run mode          : ${RUN_MODE:-interactive}
+Live log file     : $LOGFILE
+Summary file      : $SUMMARY_FILE
+
+──────────────────────────────────────────────────────────────────────────────
+SYSTEM
+──────────────────────────────────────────────────────────────────────────────
+Hostname          : $(hostname -f 2>/dev/null || hostname)
+Distribution      : $OS_ID $OS_VERSION_ID ($OS_FAMILY family)
+Kernel            : $(uname -r)
+Architecture      : $ARCH
+CPU               : $(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs)
+Cores             : $(nproc 2>/dev/null)
+Memory total      : $(free -h 2>/dev/null | awk '/^Mem/{print $2}')
+Disk root total   : $(df -h / 2>/dev/null | awk 'NR==2{print $2}')
+Public IP         : $pub_ip
+Local IP          : $local_ip
+Timezone          : $tz   ${DETECTED_CITY:+(detected via ipinfo.io: $DETECTED_CITY, $DETECTED_COUNTRY)}
+Date/time         : $(date '+%Y-%m-%d %H:%M:%S %Z')
+
+──────────────────────────────────────────────────────────────────────────────
+CORE TOOLCHAIN
+──────────────────────────────────────────────────────────────────────────────
+Midnight Commander: $(_v_or mc --version 2>/dev/null | head -1)
+Node.js           : $(_v_or node --version)
+npm               : $(_v_or npm --version)
+Git               : $(_v_or git --version | awk '{print $3}')
+Python 3          : $(_v_or python3 --version | awk '{print $2}')
+opencode          : $(if command -v opencode &>/dev/null; then opencode --version 2>/dev/null | head -1; elif [[ -x /root/.opencode/bin/opencode ]]; then /root/.opencode/bin/opencode --version 2>/dev/null | head -1; else echo "not installed"; fi)
+Claude Code       : $(_v_or claude --version | head -1)
+Ookla speedtest   : $(if command -v speedtest &>/dev/null && speedtest --version 2>/dev/null | grep -qi 'Speedtest by Ookla'; then speedtest --version | head -1; else echo "not installed"; fi)
+netperf           : $(_check "" command -v netperf | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
+iperf3            : $(_check "" command -v iperf3 | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
+
+──────────────────────────────────────────────────────────────────────────────
+SECURITY
+──────────────────────────────────────────────────────────────────────────────
+Firewall          : $FW_TOOL ($fw_state)
+Fail2Ban          : $fail2ban_state
+NTP / time sync   : $ntp_state
+Root SSH login    : $(grep -E '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo unset)
+AbuseIPDB action  : $([[ -f /etc/fail2ban/action.d/abuseipdb.conf ]] && echo "installed" || echo "not configured")
+
+──────────────────────────────────────────────────────────────────────────────
+USERS
+──────────────────────────────────────────────────────────────────────────────
+odin user         : $(id odin &>/dev/null && echo "exists (groups: $(id -nG odin 2>/dev/null | tr ' ' ','))" || echo "not created")
+odin sudoers      : $([[ -f /etc/sudoers.d/odin ]] && echo "/etc/sudoers.d/odin (NOPASSWD)" || echo "not configured")
+SSH keys (odin)   : $([[ -f /home/odin/.ssh/authorized_keys ]] && wc -l < /home/odin/.ssh/authorized_keys | awk '{print $1" key(s)"}' || echo "none")
+
+──────────────────────────────────────────────────────────────────────────────
+NETWORK
+──────────────────────────────────────────────────────────────────────────────
+Default interface : $(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+Default gateway   : $(ip route 2>/dev/null | awk '/default/{print $3; exit}')
+DNS servers       : $(grep '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+IP config method  : $(if grep -lq 'BOOTPROTO=static' /etc/sysconfig/network-scripts/ifcfg-* 2>/dev/null \
+                          || grep -lq 'dhcp4: false' /etc/netplan/*.yaml 2>/dev/null; then
+                      echo "static"
+                    else echo "DHCP"; fi)
+
+──────────────────────────────────────────────────────────────────────────────
+CLOUD INTEGRATIONS
+──────────────────────────────────────────────────────────────────────────────
+Telegram notifier : $([[ -x /usr/local/bin/telegram-notify ]] && echo "installed at /usr/local/bin/telegram-notify" || echo "not configured")
+Wasabi S3 creds   : $([[ -f /root/.aws/credentials ]] && echo "/root/.aws/credentials" || echo "not configured")
+Wasabi bucket     : $({ [[ -f /etc/profile.d/wasabi.sh ]] && grep WASABI_BUCKET /etc/profile.d/wasabi.sh | cut -d= -f2; } || echo "n/a")
+Wasabi auto-backup: $([[ -f /etc/cron.daily/wasabi-autobackup ]] && echo "daily (/etc/cron.daily/wasabi-autobackup)" || echo "not configured")
+Cloudflare DDNS   : $([[ -x /usr/local/bin/cloudflare-dns ]] && echo "installed (hourly cron: $([[ -f /etc/cron.hourly/cloudflare-dns ]] && echo yes || echo no))" || echo "not configured")
+Cloudflare record : $({ [[ -f /etc/profile.d/cloudflare.sh ]] && grep CF_NAME /etc/profile.d/cloudflare.sh | cut -d= -f2; } || echo "n/a")
+
+──────────────────────────────────────────────────────────────────────────────
+INSTALLED HELPER COMMANDS
+──────────────────────────────────────────────────────────────────────────────
+$([[ -x /usr/local/bin/telegram-notify ]] && echo "  /usr/local/bin/telegram-notify  — send Telegram alerts")
+$([[ -x /usr/local/bin/wasabi-backup ]]   && echo "  /usr/local/bin/wasabi-backup    — manual S3 upload")
+$([[ -x /usr/local/bin/wasabi-autobackup ]] && echo "  /usr/local/bin/wasabi-autobackup — daily backup runner")
+$([[ -x /usr/local/bin/cloudflare-dns ]]  && echo "  /usr/local/bin/cloudflare-dns   — DDNS updater")
+$([[ -x /usr/local/bin/speedtest ]]       && echo "  /usr/local/bin/speedtest        — Ookla speedtest CLI")
+
+──────────────────────────────────────────────────────────────────────────────
+RESULTS
+──────────────────────────────────────────────────────────────────────────────
+OK (passed checks): ${SUM_OK}
+Failed checks     : ${SUM_FAIL}
+Skipped/optional  : ${SUM_SKIP}
+Extras installed  : ${EXTRAS_OK:-0}
+Extras unavailable: ${EXTRAS_FAIL:-0}${EXTRAS_FAILED_LIST:+
+Extras skipped    :${EXTRAS_FAILED_LIST}}
+
+──────────────────────────────────────────────────────────────────────────────
+NEXT STEPS
+──────────────────────────────────────────────────────────────────────────────
+1. Reboot to apply kernel updates and group memberships (sudo reboot).
+2. Open a new shell so updated PATH (/etc/profile.d/*.sh) is loaded.
+3. Verify the firewall accepts SSH before logging out:  sudo ${FW_TOOL} status
+4. Confirm Fail2Ban is active:  sudo fail2ban-client status
+$([[ -x /usr/local/bin/telegram-notify ]] && echo "5. Test Telegram:  telegram-notify info \"hello\"")
+$([[ -x /usr/local/bin/wasabi-backup ]]   && echo "6. Test Wasabi:    wasabi-backup /etc test")
+$([[ -x /usr/local/bin/cloudflare-dns ]]  && echo "7. Test DDNS:      cloudflare-dns")
+$(command -v speedtest &>/dev/null         && echo "8. Test bandwidth: speedtest")
+
+================================================================================
+Generated by rhlinuxconfig.sh on $(date '+%Y-%m-%d %H:%M:%S %Z')
+================================================================================
+HEADER
+    } > "$SUMMARY_FILE"
+
+    chmod 644 "$SUMMARY_FILE" "$LOGFILE" 2>/dev/null || true
 }
 
 # ═══════════════════════════ M A I N ═════════════════════════════════════════
@@ -1686,6 +1852,7 @@ show_info
 
 # ── Run modes ────────────────────────────────────────────────────────────────
 if [[ $# -eq 1 && "$1" == "--quick" ]]; then
+    RUN_MODE="quick"
     header "QUICK MODE"
     do_update
     do_install
@@ -1693,11 +1860,13 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_install_extras
     do_install_speedtest
     do_install_latest
+    show_summary
     log "Quick mode done."
     exit 0
 fi
 
 if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
+    RUN_MODE="unattended"
     header "UNATTENDED MODE"
     do_update
     do_install
@@ -1715,6 +1884,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
 fi
 
 # ── Wizard: Interactive Setup ────────────────────────────────────────────────
+RUN_MODE="interactive"
 echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}  Welcome to the RHLinuxConfig Setup Wizard!              ${NC}"
 echo -e "${YELLOW}  Detected: $OS_ID $OS_VERSION_ID ($OS_FAMILY)          ${NC}"
