@@ -592,8 +592,11 @@ _install_one_best_effort() {
 do_install_extras() {
     header "Installing Extended Toolkit"
 
-    # Common — names that are identical across all four families
-    local extras="perl vim nano atop nmon traceroute telnet lynx mlocate nload bmon tcptrack vnstat ifstat darkstat"
+    # Common — names that are identical across all four families.
+    # Includes 'netperf' (likely intent of 'nperf') and 'speedtest-cli'
+    # (Python alternative); Ookla's official 'speedtest' CLI is installed
+    # separately by do_install_speedtest below since it needs a binary fetch.
+    local extras="perl vim nano atop nmon traceroute telnet lynx mlocate nload bmon tcptrack vnstat ifstat darkstat netperf speedtest-cli"
 
     # Per-family additions / name remaps
     case "$OS_FAMILY" in
@@ -630,6 +633,54 @@ do_install_extras() {
 
     # mlocate ships /etc/cron.daily/mlocate; trigger an initial DB build
     command -v updatedb &>/dev/null && updatedb &>/dev/null &
+}
+
+# ── 4.7 Install Ookla Speedtest CLI (official, static binary) ───────────────
+do_install_speedtest() {
+    header "Installing Ookla Speedtest CLI"
+    if command -v speedtest &>/dev/null; then
+        local ver
+        ver=$(speedtest --version 2>/dev/null | head -1)
+        # The Python speedtest-cli also installs as `speedtest` on some systems;
+        # detect Ookla specifically by looking for its banner.
+        if echo "$ver" | grep -qi "Speedtest by Ookla"; then
+            log "Ookla speedtest already installed: $ver"
+            return 0
+        fi
+    fi
+
+    local st_arch tarball url tmpdir
+    case "$ARCH" in
+        x86_64|amd64)   st_arch="x86_64" ;;
+        aarch64|arm64)  st_arch="aarch64" ;;
+        armv7l|armhf)   st_arch="armhf" ;;
+        i686|i386)      st_arch="i386" ;;
+        *) warn "No Ookla speedtest binary for arch: $ARCH"; return 1 ;;
+    esac
+
+    tarball="ookla-speedtest-1.2.0-linux-${st_arch}.tgz"
+    url="https://install.speedtest.net/app/cli/${tarball}"
+    tmpdir=$(mktemp -d)
+
+    info "Downloading $tarball ..."
+    if ! curl -fsSL "$url" -o "$tmpdir/$tarball"; then
+        warn "Could not download Ookla speedtest from $url"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    if tar -xzf "$tmpdir/$tarball" -C "$tmpdir" 2>/dev/null \
+        && install -m 0755 "$tmpdir/speedtest" /usr/local/bin/speedtest; then
+        rm -rf "$tmpdir"
+        # Pre-accept license/GDPR so future runs (incl. cron) don't prompt
+        mkdir -p /root/.config/ookla
+        /usr/local/bin/speedtest --accept-license --accept-gdpr --progress=no &>/dev/null || true
+        log "Ookla speedtest installed: $(speedtest --version 2>/dev/null | head -1)"
+    else
+        warn "Ookla speedtest extraction/install failed."
+        rm -rf "$tmpdir"
+        return 1
+    fi
 }
 
 # ── 5. Install opencode ─────────────────────────────────────────────────────
@@ -1571,6 +1622,19 @@ show_summary() {
     fi
 
     echo
+    echo -e "${MAG}── Network test tools ──${NC}"
+    if command -v speedtest &>/dev/null && speedtest --version 2>/dev/null | grep -qi "Speedtest by Ookla"; then
+        sum_pass "Ookla speedtest" "$(speedtest --version 2>/dev/null | head -1 | awk '{print $4}')"
+    else
+        sum_skip "Ookla speedtest"
+    fi
+    command -v netperf &>/dev/null      && sum_pass "netperf"        "installed" || sum_skip "netperf"
+    command -v speedtest-cli &>/dev/null \
+        || command -v speedtest &>/dev/null \
+        && sum_pass "speedtest (any)"   "available"                              || sum_skip "speedtest CLI"
+    command -v iperf3 &>/dev/null       && sum_pass "iperf3"         "installed" || sum_skip "iperf3"
+
+    echo
     echo -e "${MAG}── Security ──${NC}"
     _fw_active                                    && sum_pass "Firewall ($FW_TOOL)"  "active" || sum_fail "Firewall ($FW_TOOL)"  "inactive"
     systemctl is-active --quiet fail2ban 2>/dev/null && sum_pass "Fail2Ban"          "running" || sum_fail "Fail2Ban"             "not running"
@@ -1627,6 +1691,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_install
     do_install_mc
     do_install_extras
+    do_install_speedtest
     do_install_latest
     log "Quick mode done."
     exit 0
@@ -1638,6 +1703,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_install
     do_install_mc
     do_install_extras
+    do_install_speedtest
     do_install_latest
     do_install_opencode
     do_install_claude
@@ -1660,6 +1726,7 @@ do_update
 do_install
 do_install_mc
 do_install_extras
+do_install_speedtest
 do_install_latest
 do_install_opencode
 do_install_claude
