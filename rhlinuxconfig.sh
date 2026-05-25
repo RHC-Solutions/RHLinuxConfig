@@ -165,7 +165,10 @@ detect_distro() {
             PKG_MGR="dnf"
             PKG_INSTALL="dnf install -y -q"
             PKG_INSTALL_NQ="dnf install -y"
-            PKG_UPDATE="dnf check-update -q || true"
+            # makecache only refreshes metadata (and pre-imports repo GPG keys
+            # under -y); check-update would dump the entire upgradable-package
+            # list to stdout, which is just noise during the wizard.
+            PKG_UPDATE="dnf makecache -y -q --refresh"
             PKG_UPGRADE="dnf upgrade -y -q"
             PKG_AUTOREMOVE="dnf autoremove -y -q"
             PKG_CHECK="rpm -q"
@@ -317,6 +320,27 @@ wait_for_apt_lock() {
     done
 }
 
+# ── Helper: disable `deb cdrom:` sources left over from a DVD/ISO install ──
+# A fresh Debian install from the official DVD leaves a `deb cdrom:[...]` line
+# at the top of /etc/apt/sources.list. Once the disc is unmounted, `apt-get
+# update` errors on it ("does not have a Release file") and — under `set -e`
+# — kills the wizard before any net repo is even contacted.
+disable_cdrom_sources() {
+    [[ "$OS_FAMILY" != "debian" ]] && return 0
+    shopt -s nullglob
+    local f
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [[ -f "$f" ]] || continue
+        if grep -qE '^[[:space:]]*deb([[:space:]]+\[[^]]*\])?[[:space:]]+cdrom:' "$f" 2>/dev/null; then
+            cp -a "$f" "${f}.rhlc.bak" 2>/dev/null || true
+            sed -i -E 's|^([[:space:]]*deb([[:space:]]+\[[^]]*\])?[[:space:]]+cdrom:)|# \1|' "$f"
+            warn "Disabled cdrom: source in $f (backup: ${f}.rhlc.bak)"
+        fi
+    done
+    shopt -u nullglob
+    return 0
+}
+
 # ── Helper: generate random password ────────────────────────────────────────
 gen_pass() {
     tr -dc 'A-Za-z0-9_!@#%^&*()' < /dev/urandom 2>/dev/null | head -c 20
@@ -458,6 +482,7 @@ show_info() {
 do_update() {
     header "System Update"
     wait_for_apt_lock
+    disable_cdrom_sources
     info "Using $PKG_MGR — updating package lists..."
     eval "$PKG_UPDATE"
     wait_for_apt_lock
@@ -659,12 +684,11 @@ do_install_extras() {
     header "Installing Extended Toolkit"
 
     # Common — names that are identical across all four families.
-    # Includes 'netperf' (likely intent of 'nperf') and 'speedtest-cli'
-    # (Python alternative); Ookla's official 'speedtest' CLI is installed
-    # separately by do_install_speedtest below since it needs a binary fetch.
     # mlocate is deprecated on Ubuntu 22.04+ (replaced by plocate) — list both
     # so the best-effort installer picks whichever the distro ships.
-    local extras="perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat netperf speedtest-cli"
+    # Network-test tools (iperf3, netperf, speedtest-cli, Ookla speedtest) are
+    # handled separately by do_install_nettest with stricter retries/fallbacks.
+    local extras="perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat"
 
     # Per-family additions / name remaps. slurm bandwidth tool moved around in
     # Debian: list both 'slurm' and 'slurm-tools' so whichever exists installs.
@@ -704,18 +728,16 @@ do_install_extras() {
     command -v updatedb &>/dev/null && updatedb &>/dev/null &
 }
 
-# ── 4.7 Install Ookla Speedtest CLI (official, static binary) ───────────────
-do_install_speedtest() {
-    header "Installing Ookla Speedtest CLI"
-    if command -v speedtest &>/dev/null; then
-        local ver
-        ver=$(speedtest --version 2>/dev/null | head -1)
-        # The Python speedtest-cli also installs as `speedtest` on some systems;
-        # detect Ookla specifically by looking for its banner.
-        if echo "$ver" | grep -qi "Speedtest by Ookla"; then
-            log "Ookla speedtest already installed: $ver"
-            return 0
-        fi
+# ── 4.7 Install Network Test Tools (iperf3, netperf, speedtest-cli, Ookla) ──
+# Installed unconditionally on every run — these are "configure by default"
+# regardless of mode. Each tool gets its own pkg-manager attempt plus a
+# fallback (pip for speedtest-cli, static binary for Ookla) so a missing repo
+# package doesn't leave the user with an empty network-test toolkit.
+_install_ookla_speedtest() {
+    if command -v speedtest &>/dev/null \
+        && speedtest --version 2>/dev/null | grep -qi "Speedtest by Ookla"; then
+        log "Ookla speedtest already installed: $(speedtest --version 2>/dev/null | head -1)"
+        return 0
     fi
 
     local st_arch tarball url tmpdir
@@ -731,8 +753,8 @@ do_install_speedtest() {
     url="https://install.speedtest.net/app/cli/${tarball}"
     tmpdir=$(mktemp -d)
 
-    info "Downloading $tarball ..."
-    if ! curl -fsSL "$url" -o "$tmpdir/$tarball"; then
+    info "Downloading Ookla speedtest ($tarball)..."
+    if ! curl -fsSL --max-time 30 "$url" -o "$tmpdir/$tarball"; then
         warn "Could not download Ookla speedtest from $url"
         rm -rf "$tmpdir"
         return 1
@@ -750,6 +772,52 @@ do_install_speedtest() {
         rm -rf "$tmpdir"
         return 1
     fi
+}
+
+do_install_nettest() {
+    header "Installing Network Test Tools"
+
+    # iperf3 — usually already in via PACKAGES_CORE, but make sure.
+    if ! command -v iperf3 &>/dev/null; then
+        info "Installing iperf3..."
+        [[ "$OS_FAMILY" == "debian" ]] && wait_for_apt_lock
+        $PKG_INSTALL iperf3 &>/dev/null || true
+    fi
+    command -v iperf3 &>/dev/null \
+        && log "iperf3: $(iperf3 --version 2>/dev/null | head -1)" \
+        || warn "iperf3: install failed (not in $OS_FAMILY repos?)"
+
+    # netperf — on RHEL needs EPEL (enabled earlier); on Arch it lives in AUR
+    # (not handled here, hence the soft warn).
+    if ! command -v netperf &>/dev/null; then
+        info "Installing netperf..."
+        [[ "$OS_FAMILY" == "debian" ]] && wait_for_apt_lock
+        $PKG_INSTALL netperf &>/dev/null || true
+    fi
+    command -v netperf &>/dev/null \
+        && log "netperf: installed" \
+        || warn "netperf: not available in $OS_FAMILY repos (skip or build from source)"
+
+    # speedtest-cli (Python) — try pkg first, pip3 as a fallback (newer distros
+    # sometimes drop the deb/rpm package).
+    if ! command -v speedtest-cli &>/dev/null; then
+        info "Installing speedtest-cli..."
+        [[ "$OS_FAMILY" == "debian" ]] && wait_for_apt_lock
+        if ! $PKG_INSTALL speedtest-cli &>/dev/null; then
+            if command -v pip3 &>/dev/null; then
+                info "  pkg manager didn't provide it — trying pip3..."
+                pip3 install --quiet --break-system-packages speedtest-cli 2>/dev/null \
+                    || pip3 install --quiet speedtest-cli 2>/dev/null || true
+            fi
+        fi
+    fi
+    command -v speedtest-cli &>/dev/null \
+        && log "speedtest-cli: $(speedtest-cli --version 2>/dev/null | head -1)" \
+        || warn "speedtest-cli: install failed (pkg + pip3 both unavailable)"
+
+    # Ookla speedtest — static binary from speedtest.net (separate from the
+    # Python speedtest-cli; both can coexist).
+    _install_ookla_speedtest
 }
 
 # ── 5. Install opencode ─────────────────────────────────────────────────────
@@ -833,69 +901,6 @@ EOF
 
     warn "All three opencode install methods failed."
     warn "Install manually later:  curl -fsSL https://opencode.ai/install | bash"
-    return 1
-}
-
-# ── 5.5 Install pi (Earendil pi-coding-agent, pi.dev) ───────────────────────
-_pi_present() { command -v pi &>/dev/null; }
-
-_write_pi_profile() {
-    cat > /etc/profile.d/pi.sh <<'EOF'
-for d in /root/.local/bin /root/.pi/bin /usr/local/share/npm-global/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
-    if [[ -d "$d" && ":$PATH:" != *":$d:"* ]]; then
-        export PATH="$d:$PATH"
-    fi
-done
-EOF
-    chmod +x /etc/profile.d/pi.sh
-}
-
-do_install_pi() {
-    header "Installing pi (Earendil pi-coding-agent)"
-    if _pi_present; then
-        log "pi already installed: $(pi --version 2>/dev/null || echo present)"
-        return 0
-    fi
-
-    # Make any post-install PATHs discoverable for the rest of this script
-    export PATH="/root/.local/bin:/root/.pi/bin:/usr/local/share/npm-global/bin:$PATH"
-
-    # ── Method 1: official installer (pi.dev/install.sh) ───────────────────
-    info "Method 1/2: official installer (curl pi.dev/install.sh | sh)..."
-    if timeout 60 bash -c 'curl -fsSL --max-time 30 https://pi.dev/install.sh | sh' 2>&1 | tail -5; then
-        # Rescan common install paths now that the installer's run
-        for d in /usr/local/bin /root/.local/bin /root/.pi/bin "$HOME/.local/bin" "$HOME/.pi/bin"; do
-            [[ -x "$d/pi" ]] && export PATH="$d:$PATH"
-        done
-        if _pi_present; then
-            log "pi installed via official script: $(pi --version 2>/dev/null || echo ok)"
-            _write_pi_profile
-            return 0
-        fi
-    fi
-    warn "Official installer didn't produce a 'pi' binary — falling back to npm..."
-
-    # ── Method 2: npm package @earendil-works/pi-coding-agent ──────────────
-    if command -v npm &>/dev/null; then
-        info "Method 2/2: npm install -g --ignore-scripts @earendil-works/pi-coding-agent..."
-        mkdir -p /usr/local/share/npm-global
-        npm config set prefix /usr/local/share/npm-global 2>/dev/null || true
-        export PATH="/usr/local/share/npm-global/bin:$PATH"
-        if npm install -g --ignore-scripts --unsafe-perm=true @earendil-works/pi-coding-agent 2>&1 | tail -3; then
-            if _pi_present; then
-                log "pi installed via npm: $(pi --version 2>/dev/null || echo ok)"
-                _write_pi_profile
-                return 0
-            fi
-        fi
-        warn "npm install of @earendil-works/pi-coding-agent failed."
-    else
-        warn "npm not available for fallback."
-    fi
-
-    warn "Both pi install methods failed. Install manually later:"
-    warn "  curl -fsSL https://pi.dev/install.sh | sh"
-    warn "  npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
     return 1
 }
 
@@ -1784,11 +1789,6 @@ show_summary() {
     else
         sum_fail "Claude Code" "install failed"
     fi
-    if command -v pi &>/dev/null; then
-        sum_pass "pi (pi.dev)" "$(pi --version 2>/dev/null | head -1 || echo ok)"
-    else
-        sum_skip "pi (pi.dev)"
-    fi
 
     echo
     echo -e "${MAG}── Network test tools ──${NC}"
@@ -1903,7 +1903,6 @@ Git               : $(_v_or git --version | awk '{print $3}')
 Python 3          : $(_v_or python3 --version | awk '{print $2}')
 opencode          : $(if command -v opencode &>/dev/null; then opencode --version 2>/dev/null | head -1; elif [[ -x /root/.opencode/bin/opencode ]]; then /root/.opencode/bin/opencode --version 2>/dev/null | head -1; else echo "not installed"; fi)
 Claude Code       : $(_v_or claude --version | head -1)
-pi (pi.dev)       : $(if command -v pi &>/dev/null; then pi --version 2>/dev/null | head -1 || echo installed; else echo "not installed"; fi)
 Ookla speedtest   : $(if command -v speedtest &>/dev/null && speedtest --version 2>/dev/null | grep -qi 'Speedtest by Ookla'; then speedtest --version | head -1; else echo "not installed"; fi)
 netperf           : $(_check "" command -v netperf | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
 iperf3            : $(_check "" command -v iperf3 | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
@@ -2013,7 +2012,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_install
     do_install_mc
     do_install_extras
-    do_install_speedtest
+    do_install_nettest
     do_install_latest
     show_summary
     log "Quick mode done."
@@ -2027,10 +2026,9 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_install
     do_install_mc
     do_install_extras
-    do_install_speedtest
+    do_install_nettest
     do_install_latest
     do_install_opencode
-    do_install_pi
     do_install_claude
     setup_firewall
     setup_fail2ban
@@ -2053,7 +2051,7 @@ do_update
 do_install
 do_install_mc
 do_install_extras
-do_install_speedtest
+do_install_nettest
 do_install_latest
 do_install_opencode
 do_install_claude
