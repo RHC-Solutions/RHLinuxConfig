@@ -611,50 +611,49 @@ do_update() {
 }
 
 # ── 3. Install Base Tools ───────────────────────────────────────────────────
+# Per-distro check: does the package manager's index know about this package?
+# Returns 0 if available, non-zero otherwise. Lets pkg_install warn and skip
+# instead of failing hard on a name that differs between releases.
+_pkg_available() {
+    local pkg="$1"
+    case "$OS_FAMILY" in
+        debian) apt-cache show "$pkg" &>/dev/null ;;
+        rhel)   dnf info "$pkg" &>/dev/null ;;
+        arch)   pacman -Si "$pkg" &>/dev/null ;;
+        suse)   zypper --non-interactive info "$pkg" 2>/dev/null \
+                    | grep -qE "^Name *: *${pkg}$" ;;
+        *)      return 0 ;;
+    esac
+}
+
 pkg_install() {
     local pkgs=("$@")
-    case "$OS_FAMILY" in
-        debian)
-            local missing=() unavailable=() to_install=()
-            for pkg in "${pkgs[@]}"; do
-                $PKG_CHECK "$pkg" &>/dev/null && continue
-                missing+=("$pkg")
-            done
-            [[ ${#missing[@]} -eq 0 ]] && return 0
-            # Pre-filter against apt-cache so a package that doesn't exist in
-            # the index (e.g. dropped between Debian releases) doesn't make
-            # the whole apt-get install fail under `set -e`.
-            for pkg in "${missing[@]}"; do
-                if apt-cache show "$pkg" &>/dev/null; then
-                    to_install+=("$pkg")
-                else
-                    unavailable+=("$pkg")
-                fi
-            done
-            [[ ${#unavailable[@]} -gt 0 ]] \
-                && warn "Not in apt index, skipping: ${unavailable[*]}"
-            [[ ${#to_install[@]} -eq 0 ]] && return 0
-            wait_for_apt_lock
-            $PKG_INSTALL "${to_install[@]}" ;;
-        rhel)
-            local missing=()
-            for pkg in "${pkgs[@]}"; do
-                $PKG_CHECK "$pkg" &>/dev/null 2>&1 || missing+=("$pkg")
-            done
-            [[ ${#missing[@]} -eq 0 ]] && return 0
-            $PKG_INSTALL "${missing[@]}" 2>&1 | tail -3 || true
-            # Retry once for EPEL packages that might need enabling
-            local retry=()
-            for pkg in "${missing[@]}"; do
-                $PKG_CHECK "$pkg" &>/dev/null 2>&1 || retry+=("$pkg")
-            done
-            [[ ${#retry[@]} -gt 0 ]] && $PKG_INSTALL "${retry[@]}" 2>&1 | tail -3 || true
-            ;;
-        arch)
-            $PKG_INSTALL "${pkgs[@]}" 2>&1 | tail -3 || true ;;
-        suse)
-            $PKG_INSTALL "${pkgs[@]}" 2>&1 | tail -3 || true ;;
-    esac
+    local missing=() unavailable=() to_install=() pkg
+
+    # 1. Skip anything already installed.
+    for pkg in "${pkgs[@]}"; do
+        $PKG_CHECK "$pkg" &>/dev/null && continue
+        missing+=("$pkg")
+    done
+    [[ ${#missing[@]} -eq 0 ]] && return 0
+
+    # 2. Filter by index — same UX on every distro: skip-and-warn beats
+    # aborting the wizard on a name that doesn't exist in this release.
+    for pkg in "${missing[@]}"; do
+        if _pkg_available "$pkg"; then
+            to_install+=("$pkg")
+        else
+            unavailable+=("$pkg")
+        fi
+    done
+    [[ ${#unavailable[@]} -gt 0 ]] \
+        && warn "Not in $PKG_MGR index, skipping: ${unavailable[*]}"
+    [[ ${#to_install[@]} -eq 0 ]] && return 0
+
+    # 3. Install. `|| true` keeps the wizard alive even if one package's
+    # dependency resolution explodes — caller can re-check $PKG_CHECK later.
+    [[ "$OS_FAMILY" == "debian" ]] && wait_for_apt_lock
+    $PKG_INSTALL "${to_install[@]}" 2>&1 | tail -3 || true
 }
 
 do_install() {
