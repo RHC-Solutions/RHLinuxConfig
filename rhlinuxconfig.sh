@@ -362,8 +362,72 @@ disable_cdrom_sources() {
         warn "Disabled cdrom: stanza in $f (backup: ${f}.rhlc.bak)"
     done
 
+    # If nothing else remains (DVD-only installs sometimes never configure a
+    # net mirror), apt-get update would now pass vacuously and apt-get install
+    # would fail with "Unable to locate package". Write default mirrors.
+    _ensure_debian_net_repo
+
     shopt -u nullglob
     return 0
+}
+
+# ── Helper: write default Debian/Ubuntu net repos if none are configured ───
+_ensure_debian_net_repo() {
+    [[ "$OS_FAMILY" != "debian" ]] && return 0
+    shopt -s nullglob
+
+    local f found=0
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [[ -f "$f" ]] || continue
+        if grep -qE '^[[:space:]]*deb([[:space:]]+\[[^]]*\])?[[:space:]]+https?://' "$f" 2>/dev/null; then
+            found=1; break
+        fi
+    done
+    if [[ $found -eq 0 ]]; then
+        for f in /etc/apt/sources.list.d/*.sources; do
+            [[ -f "$f" ]] || continue
+            # active = stanza has URIs: http(s):// AND does not have Enabled: no
+            if awk '
+                BEGIN { RS = ""; rc = 1 }
+                /(^|\n)[[:space:]]*URIs:[[:space:]]*[^\n]*https?:\/\// \
+                    && $0 !~ /(^|\n)[[:space:]]*Enabled:[[:space:]]*no/ { rc = 0 }
+                END { exit rc }
+            ' "$f"; then
+                found=1; break
+            fi
+        done
+    fi
+
+    if [[ $found -eq 1 ]]; then
+        shopt -u nullglob
+        return 0
+    fi
+
+    local suite="${OS_CODENAME:-}"
+    [[ -z "$suite" ]] && suite=$(lsb_release -cs 2>/dev/null || echo trixie)
+
+    warn "No usable apt net repo found — writing default $OS_ID mirrors for '$suite'."
+    if [[ "$OS_ID" == "ubuntu" ]]; then
+        cat > /etc/apt/sources.list.d/rhlc-defaults.list <<EOF
+deb http://archive.ubuntu.com/ubuntu $suite main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $suite-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $suite-security main restricted universe multiverse
+EOF
+    else
+        # Debian 12+ ships firmware in its own component (`non-free-firmware`);
+        # 11 and earlier put it in `non-free`. Detect by codename.
+        local comps="main contrib non-free non-free-firmware"
+        case "$suite" in
+            buster|bullseye) comps="main contrib non-free" ;;
+        esac
+        cat > /etc/apt/sources.list.d/rhlc-defaults.list <<EOF
+deb http://deb.debian.org/debian $suite $comps
+deb http://deb.debian.org/debian $suite-updates $comps
+deb http://security.debian.org/debian-security $suite-security $comps
+EOF
+    fi
+    info "Wrote /etc/apt/sources.list.d/rhlc-defaults.list."
+    shopt -u nullglob
 }
 
 # ── Helper: generate random password ────────────────────────────────────────
