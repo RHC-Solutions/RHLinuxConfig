@@ -321,14 +321,18 @@ wait_for_apt_lock() {
 }
 
 # ── Helper: disable `deb cdrom:` sources left over from a DVD/ISO install ──
-# A fresh Debian install from the official DVD leaves a `deb cdrom:[...]` line
-# at the top of /etc/apt/sources.list. Once the disc is unmounted, `apt-get
-# update` errors on it ("does not have a Release file") and — under `set -e`
-# — kills the wizard before any net repo is even contacted.
+# A fresh Debian install from the official DVD leaves a `cdrom:[...]` source
+# in apt's config. Once the disc is unmounted, `apt-get update` errors on it
+# ("does not have a Release file") and — under `set -e` — kills the wizard
+# before any net repo is even contacted. Debian 13 stores sources in two
+# formats: classic single-line `deb cdrom:...` in .list files, and deb822
+# multi-line stanzas (`URIs: cdrom:...`) in .sources files. Handle both.
 disable_cdrom_sources() {
     [[ "$OS_FAMILY" != "debian" ]] && return 0
     shopt -s nullglob
     local f
+
+    # Classic format: /etc/apt/sources.list + /etc/apt/sources.list.d/*.list
     for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
         [[ -f "$f" ]] || continue
         if grep -qE '^[[:space:]]*deb([[:space:]]+\[[^]]*\])?[[:space:]]+cdrom:' "$f" 2>/dev/null; then
@@ -337,6 +341,27 @@ disable_cdrom_sources() {
             warn "Disabled cdrom: source in $f (backup: ${f}.rhlc.bak)"
         fi
     done
+
+    # deb822 format: any stanza with a `URIs:` field referencing cdrom: gets
+    # `Enabled: no` appended, which is apt's native way of disabling a stanza
+    # without removing it.
+    for f in /etc/apt/sources.list.d/*.sources; do
+        [[ -f "$f" ]] || continue
+        grep -qE '^[[:space:]]*URIs:[[:space:]]*.*cdrom:' "$f" 2>/dev/null || continue
+        cp -a "$f" "${f}.rhlc.bak" 2>/dev/null || true
+        awk '
+            BEGIN { RS = ""; ORS = "\n\n" }
+            {
+                if ($0 ~ /(^|\n)[[:space:]]*URIs:[[:space:]]*[^\n]*cdrom:/ \
+                    && $0 !~ /(^|\n)[[:space:]]*Enabled:[[:space:]]*no/) {
+                    $0 = $0 "\nEnabled: no"
+                }
+                print
+            }
+        ' "$f" > "${f}.rhlc.tmp" && mv "${f}.rhlc.tmp" "$f"
+        warn "Disabled cdrom: stanza in $f (backup: ${f}.rhlc.bak)"
+    done
+
     shopt -u nullglob
     return 0
 }
