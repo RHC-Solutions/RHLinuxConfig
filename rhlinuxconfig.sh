@@ -278,7 +278,11 @@ resolve_pkg_list() {
     local pkgs="$PACKAGES_CORE"
     case "$OS_FAMILY" in
         debian)
-            pkgs="$pkgs software-properties-common apt-transport-https ca-certificates build-essential"
+            pkgs="$pkgs apt-transport-https ca-certificates build-essential"
+            # software-properties-common provides `add-apt-repository`, used
+            # later for git-core and deadsnakes PPAs — both Ubuntu-only. Debian
+            # 13 also dropped the package from main, so don't ask for it there.
+            [[ "$OS_ID" == "ubuntu" ]] && pkgs="$pkgs software-properties-common"
             # netplan only on Ubuntu
             [[ "$OS_ID" == "ubuntu" || "$OS_ID" == "debian" ]] && pkgs="$pkgs netplan.io"
             pkgs="$pkgs $SENSORS_PKG $FIREWALL_PKG fail2ban"
@@ -611,13 +615,27 @@ pkg_install() {
     local pkgs=("$@")
     case "$OS_FAMILY" in
         debian)
-            local missing=()
+            local missing=() unavailable=() to_install=()
             for pkg in "${pkgs[@]}"; do
-                $PKG_CHECK "$pkg" &>/dev/null || missing+=("$pkg")
+                $PKG_CHECK "$pkg" &>/dev/null && continue
+                missing+=("$pkg")
             done
             [[ ${#missing[@]} -eq 0 ]] && return 0
+            # Pre-filter against apt-cache so a package that doesn't exist in
+            # the index (e.g. dropped between Debian releases) doesn't make
+            # the whole apt-get install fail under `set -e`.
+            for pkg in "${missing[@]}"; do
+                if apt-cache show "$pkg" &>/dev/null; then
+                    to_install+=("$pkg")
+                else
+                    unavailable+=("$pkg")
+                fi
+            done
+            [[ ${#unavailable[@]} -gt 0 ]] \
+                && warn "Not in apt index, skipping: ${unavailable[*]}"
+            [[ ${#to_install[@]} -eq 0 ]] && return 0
             wait_for_apt_lock
-            $PKG_INSTALL "${missing[@]}" ;;
+            $PKG_INSTALL "${to_install[@]}" ;;
         rhel)
             local missing=()
             for pkg in "${pkgs[@]}"; do
