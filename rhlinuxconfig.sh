@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
 #===============================================================================
 # RHLinuxConfig — Universal Linux Setup & Hardening Wizard
-# Supports: AlmaLinux, Rocky, CentOS, Debian, Ubuntu, Arch, Mint
-# - System info, updates, tools, Node/Git/Python, opencode, claude-code
-# - Telegram alerts, Wasabi backup, UFW/Firewalld + Fail2Ban + AbuseIPDB
+# Supports: AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Mint,
+#           Arch, Manjaro, openSUSE, SLES
+# - System info, updates, base + extended toolkit, network test tools
+# - Latest Node / Git / Python, opencode, Claude Code
+# - Telegram alerts, Wasabi backup, Cloudflare DDNS
+# - UFW / firewalld + Fail2Ban + AbuseIPDB
 # - Static IP, root password/disable, odin user creation
+# Behaviors worth knowing:
+# - Prompts show a live "[Ns]" countdown; safe [Y/n] → 5s default-yes,
+#   opt-in [y/N] → 30s default-no, text → 5s default-empty.
+# - Debian: leftover `deb cdrom:` sources are auto-disabled; default
+#   net mirrors are written if none are configured.
+# - pkg_install warns + skips packages missing from the distro index
+#   instead of aborting under `set -e`.
 #===============================================================================
 set -euo pipefail
 

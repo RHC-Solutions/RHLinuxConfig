@@ -18,7 +18,7 @@ Universal Linux server setup & hardening wizard. One script, every major distro 
 
 Supports **AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Linux Mint, Arch, Manjaro, openSUSE, SLES**.
 
-Prompts during the interactive wizard **auto-accept "yes" after 5 seconds** of inactivity — walk away and the install completes itself with sensible defaults.
+Prompts during the interactive wizard show a **live `[Ns]` countdown** next to each question. Safe `[Y/n]` confirmations auto-accept after 5 s; opt-in `[y/N]` prompts (cloud integrations, static IP, etc.) auto-decline after 30 s; text prompts fall back to the bracketed default after 5 s. Walk away and the install completes itself with sensible defaults. Override per-run with `AUTO_YES_TIMEOUT`, `AUTO_NO_TIMEOUT`, `AUTO_TEXT_TIMEOUT` env vars (`0` = wait forever).
 
 ---
 
@@ -86,25 +86,27 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 ### Install phase
 | # | Step | Detail |
 |---|------|--------|
-| 3 | **Full upgrade** | `apt`, `dnf`, `pacman -Syu`, or `zypper` — with autoremove |
-| 4 | **Base tools** | `curl wget htop ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr screen tmux unzip zip gpg jq tree rsync` + build essentials + `lm-sensors` + `fail2ban` + firewall pkg |
-| 5 | **Midnight Commander** | Installs `mc`, sets `mcedit` as `$EDITOR` system-wide via `/etc/profile.d/mc.sh`, registers with `update-alternatives` |
-| 6 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL |
-| 7 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh` |
-| 8 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh` |
+| 3 | **Full upgrade** | `apt`, `dnf`, `pacman -Syu`, or `zypper` — with autoremove. On Debian, any leftover `deb cdrom:` source from a DVD install is auto-disabled; if no usable net repo exists, default `deb.debian.org` / `archive.ubuntu.com` mirrors are written for the detected suite. |
+| 4 | **Base tools** | `curl wget htop ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr screen tmux unzip zip gpg jq tree rsync` + build essentials + `lm-sensors` + `fail2ban` + firewall pkg. Packages not in the distro's index are warned + skipped, never abort the run. |
+| 5 | **Extended toolkit** | Best-effort install of `perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat` and distro-specific extras (netcat, snmp, iptraf-ng, ntopng, …). |
+| 6 | **Network test tools** | Dedicated step for `iperf3`, `netperf`, `speedtest-cli` (with `pip3` fallback), and Ookla's official `speedtest` CLI (static binary from `install.speedtest.net`). Each tool logs its own success/skip line. |
+| 7 | **Midnight Commander** | Installs `mc`, sets `mcedit` as `$EDITOR` system-wide via `/etc/profile.d/mc.sh`, registers with `update-alternatives` |
+| 8 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL |
+| 9 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh` |
+| 10 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh` |
 
 ### Interactive wizards (full mode only)
 | # | Step | Detail |
 |---|------|--------|
-| 9 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
-| 10 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
-| 11 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
-| 12 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
-| 13 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
-| 14 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
-| 15 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
-| 16 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
-| 17 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
+| 11 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
+| 12 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
+| 13 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
+| 14 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
+| 15 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
+| 16 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
+| 17 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
+| 18 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
+| 19 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
 
 ---
 
@@ -187,6 +189,8 @@ Distro-specific behavior lives in `case "$OS_FAMILY"` blocks — add a new arm (
 
 | Symptom | Try |
 |---------|-----|
+| `cdrom:[...] does not have a Release file` | Auto-handled on Debian: the wizard comments out the cdrom source and writes default `deb.debian.org` mirrors if none exist. To fix manually: `sed -i '/cdrom:/s/^/# /' /etc/apt/sources.list`. |
+| `Unable to locate package <name>` | The wizard now warns and skips (`[!] Not in <pkg_mgr> index, skipping: …`) instead of aborting. If you're running an older copy: re-curl with `curl -fsSL ".../rhlinuxconfig.sh?v=$(date +%s)" -o /tmp/rhlinuxconfig.sh`. |
 | ipinfo.io step warns "unreachable" | Check outbound HTTPS / DNS. Script continues; set timezone manually with `timedatectl set-timezone Europe/Berlin` |
 | `claude` not in `$PATH` after install | `source /etc/profile.d/claude-code.sh` or open a new shell |
 | Locked out via UFW after enabling | Boot single-user, `ufw allow ssh && ufw reload` |
