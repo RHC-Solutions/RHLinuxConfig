@@ -91,22 +91,46 @@ prompt(){
     fi
 
     if [[ "$timeout_secs" -gt 0 ]]; then
-        # NB: do NOT redirect stderr here. 'read -p PROMPT' writes the prompt
-        # text to stderr; suppressing it makes every prompt invisible (you
-        # only see the answer/timeout result, not the question). That was
-        # masking the entire interactive UX.
-        if read -rt "$timeout_secs" -p "$(echo -e "${CYAN}→${NC}  $msg")" "$@"; then
-            return 0
-        else
-            # Timeout (or read error) — apply per-type default
-            [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
-            if [[ -n "$is_confirm" ]]; then
-                echo -e " ${YELLOW}${timeout_default}${NC} (auto after ${timeout_secs}s)"
+        # Char-by-char read loop so we can redraw a visible "[Ns]" countdown
+        # next to the prompt each second. `read -s` suppresses terminal echo;
+        # we redraw the buffer ourselves so typed input still appears.
+        local prompt_text buf="" ch elapsed=0 remaining=$timeout_secs
+        prompt_text="$(echo -e "${CYAN}→${NC}  $msg")"
+        # \r returns to column 0; \033[K clears to end-of-line, so old
+        # countdown digits don't bleed through when remaining shrinks.
+        printf '\r\033[K%s%b[%2ds]%b %s' "$prompt_text" "$YELLOW" "$remaining" "$NC" "$buf" >&2
+        while (( elapsed < timeout_secs )); do
+            if IFS= read -rs -n1 -t1 ch 2>/dev/null; then
+                if [[ -z "$ch" ]]; then
+                    # Enter (with -n1, $ch is empty on newline)
+                    printf '\n' >&2
+                    [[ -n "$varname" ]] && printf -v "$varname" '%s' "$buf"
+                    return 0
+                elif [[ "$ch" == $'\x7f' || "$ch" == $'\b' ]]; then
+                    buf="${buf%?}"
+                else
+                    buf+="$ch"
+                fi
             else
-                echo -e " ${YELLOW}<default>${NC} (auto after ${timeout_secs}s)"
+                elapsed=$((elapsed + 1))
+                remaining=$((timeout_secs - elapsed))
             fi
+            printf '\r\033[K%s%b[%2ds]%b %s' "$prompt_text" "$YELLOW" "$remaining" "$NC" "$buf" >&2
+        done
+        # Timed out — finalize line and apply per-type default
+        printf '\n' >&2
+        if [[ -n "$buf" ]]; then
+            # User was typing but never hit Enter; accept what they had
+            [[ -n "$varname" ]] && printf -v "$varname" '%s' "$buf"
             return 0
         fi
+        [[ -n "$varname" ]] && printf -v "$varname" '%s' "$timeout_default"
+        if [[ -n "$is_confirm" ]]; then
+            echo -e "${CYAN}→${NC}  $msg ${YELLOW}${timeout_default}${NC} (auto after ${timeout_secs}s)"
+        else
+            echo -e "${CYAN}→${NC}  $msg ${YELLOW}<default>${NC} (auto after ${timeout_secs}s)"
+        fi
+        return 0
     else
         read -rp "$(echo -e "${CYAN}→${NC}  $msg")" "$@" || true
     fi
