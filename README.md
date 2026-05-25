@@ -87,26 +87,28 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | # | Step | Detail |
 |---|------|--------|
 | 3 | **Full upgrade** | `apt`, `dnf`, `pacman -Syu`, or `zypper` — with autoremove. On Debian, any leftover `deb cdrom:` source from a DVD install is auto-disabled; if no usable net repo exists, default `deb.debian.org` / `archive.ubuntu.com` mirrors are written for the detected suite. |
-| 4 | **Base tools** | `curl wget htop ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr screen tmux unzip zip gpg jq tree rsync` + build essentials + `lm-sensors` + `fail2ban` + firewall pkg. Packages not in the distro's index are warned + skipped, never abort the run. |
-| 5 | **Extended toolkit** | Best-effort install of `perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat` and distro-specific extras (netcat, snmp, iptraf-ng, ntopng, …). |
-| 6 | **Network test tools** | Dedicated step for `iperf3`, `netperf`, `speedtest-cli` (with `pip3` fallback), and Ookla's official `speedtest` CLI (static binary from `install.speedtest.net`). Each tool logs its own success/skip line. |
-| 7 | **Midnight Commander** | Installs `mc`, sets `mcedit` as `$EDITOR` system-wide via `/etc/profile.d/mc.sh`, registers with `update-alternatives` |
-| 8 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL |
-| 9 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh` |
-| 10 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh` |
+| 4 | **Base tools** | `curl wget htop glances mc ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr screen tmux unzip zip gpg jq tree rsync` + build essentials + `lm-sensors` + `fail2ban` + firewall pkg. Packages not in the distro's index are warned + skipped, never abort the run. |
+| 5 | **Midnight Commander** | Installs `mc`, sets `mcedit` as `$EDITOR` system-wide via `/etc/profile.d/mc.sh`, registers with `update-alternatives`. |
+| 6 | **tmux defaults** | Lays down `/etc/tmux.conf` (mouse on, 256-colour, 50k scrollback, vi mode, base-index 1, `prefix \|` / `prefix -` splits, `prefix r` reload) and `/etc/profile.d/tmux.sh` (`t`, `ta`, `tls` aliases). Users override via `~/.tmux.conf`. |
+| 7 | **Extended toolkit** | Best-effort install of `perl vim nano atop nmon traceroute telnet lynx plocate mlocate nload bmon tcptrack vnstat ifstat darkstat` and distro-specific extras (netcat, snmp, iptraf-ng, ntopng, …). |
+| 8 | **Network test tools** | Dedicated step for `iperf3`, `netperf`, `speedtest-cli` (with `pip3` fallback), and Ookla's official `speedtest` CLI (static binary from `install.speedtest.net`). Each tool logs its own success/skip line. |
+| 9 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL. |
+| 10 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh`. |
+| 11 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh`. |
+| 12 | **Node + global modules refresh** | Bumps `npm` itself, then runs `npm update -g` so every globally installed package (opencode, claude-code, anything else) is at its latest semver. Prints the before/after `npm list -g --depth=0` so you can see what moved. |
 
 ### Interactive wizards (full mode only)
 | # | Step | Detail |
 |---|------|--------|
-| 11 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
-| 12 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
-| 13 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
-| 14 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
-| 15 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
-| 16 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
-| 17 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
-| 18 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
-| 19 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
+| 13 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
+| 14 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
+| 15 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
+| 16 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
+| 17 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
+| 18 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
+| 19 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
+| 20 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
+| 21 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
 
 ---
 
@@ -132,6 +134,15 @@ cloudflare-dns --ip 203.0.113.10                # specify IP
 # Midnight Commander
 mc                                              # mouse + xterm enabled via alias
 mcedit /etc/hosts                               # default $EDITOR after install
+
+# tmux (system defaults from /etc/tmux.conf — users override via ~/.tmux.conf)
+t                                               # alias for tmux
+ta                                              # attach if a session exists, otherwise new
+tls                                             # list sessions
+# Inside tmux: prefix |/-  split panes; prefix r  reload /etc/tmux.conf
+
+# System monitor
+glances                                         # top alternative, also exposes a REST API
 ```
 
 ---
@@ -144,6 +155,8 @@ mcedit /etc/hosts                               # default $EDITOR after install
 /usr/local/bin/wasabi-autobackup      # Daily backup runner
 /usr/local/bin/cloudflare-dns         # DDNS updater
 
+/etc/tmux.conf                        # System-wide tmux defaults (mouse, 256-colour, vi mode, base-1)
+/etc/profile.d/tmux.sh                # t / ta / tls aliases
 /etc/profile.d/mc.sh                  # EDITOR=mcedit, mc aliases
 /etc/profile.d/opencode.sh            # opencode PATH
 /etc/profile.d/claude-code.sh         # claude PATH

@@ -4,7 +4,9 @@
 # Supports: AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Mint,
 #           Arch, Manjaro, openSUSE, SLES
 # - System info, updates, base + extended toolkit, network test tools
+# - tmux defaults (/etc/tmux.conf), glances, Midnight Commander
 # - Latest Node / Git / Python, opencode, Claude Code
+# - Refreshes npm + all globally installed npm packages each run
 # - Telegram alerts, Wasabi backup, Cloudflare DDNS
 # - UFW / firewalld + Fail2Ban + AbuseIPDB
 # - Static IP, root password/disable, odin user creation
@@ -261,7 +263,7 @@ detect_distro() {
 }
 
 # ── Distro-specific package maps ────────────────────────────────────────────
-PACKAGES_CORE="curl wget htop mc ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr-tiny screen tmux unzip zip gpg jq tree rsync"
+PACKAGES_CORE="curl wget htop glances mc ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr-tiny screen tmux unzip zip gpg jq tree rsync"
 
 # Packages that differ by family (set after detect_distro)
 PACKAGES_EXTRA=""
@@ -785,6 +787,69 @@ EOF
     log "mc defaults installed at /etc/profile.d/mc.sh (EDITOR=mcedit, mouse on)"
 }
 
+# ── 4.5.5 Install tmux + system-wide sensible defaults ─────────────────────
+# tmux is already in PACKAGES_CORE so this step usually just lays down the
+# config files. /etc/tmux.conf is loaded by tmux at startup; users can still
+# override anything via ~/.tmux.conf.
+do_install_tmux() {
+    header "Installing tmux"
+    if command -v tmux &>/dev/null; then
+        log "tmux already installed: $(tmux -V 2>/dev/null)"
+    else
+        pkg_install tmux
+        command -v tmux &>/dev/null && log "tmux installed: $(tmux -V 2>/dev/null)" \
+            || { warn "tmux install failed."; return; }
+    fi
+
+    cat > /etc/tmux.conf <<'EOF'
+# RHLinuxConfig — system-wide tmux defaults. Users override via ~/.tmux.conf.
+
+# Mouse: scroll, click panes, drag split borders.
+set -g mouse on
+
+# True colour + italics support inside tmux.
+set -g default-terminal "tmux-256color"
+set -as terminal-overrides ",*256col*:Tc"
+
+# Big scrollback (default is 2000 lines, easy to overflow during builds).
+set -g history-limit 50000
+
+# Vi-style copy mode — `prefix [` then hjkl, v to select, y to copy.
+setw -g mode-keys vi
+
+# Window/pane numbering starts at 1 (closer to the number row).
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+
+# Make Esc feel snappier without breaking vim.
+set -sg escape-time 10
+
+# Status bar: hostname on the left, date/time on the right.
+set -g status-style "bg=black,fg=cyan"
+set -g status-left  "#[fg=green]#H "
+set -g status-right "#[fg=yellow]%Y-%m-%d %H:%M"
+set -g status-interval 5
+
+# Reload bind so config tweaks don't need a full server restart.
+bind r source-file /etc/tmux.conf \; display "tmux.conf reloaded"
+
+# Split panes with keys that look like what they do.
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+EOF
+    chmod 0644 /etc/tmux.conf
+
+    cat > /etc/profile.d/tmux.sh <<'EOF'
+# tmux convenience aliases
+alias t='tmux'
+alias ta='tmux attach || tmux new'
+alias tls='tmux ls'
+EOF
+    chmod +x /etc/profile.d/tmux.sh
+    log "tmux defaults installed at /etc/tmux.conf + /etc/profile.d/tmux.sh"
+}
+
 # ── 4.6 Install Extended Sysadmin / Network Toolkit (best-effort) ───────────
 # Packages requested: man perl vim nano atop nmon traceroute telnet lynx mlocate
 # iptraf-ng nload bmon tcptrack vnstat cbm speedometer pktstat ifstat ntopng
@@ -1079,6 +1144,42 @@ EOF
         echo 'export PATH="$HOME/.claude/bin:$PATH"' >> /root/.bashrc
     fi
     log "Claude Code PATH configured."
+}
+
+# ── 6.5 Check & Update Node + global npm modules ──────────────────────────
+# Runs after the Node-LTS install path (do_install_latest) and the global
+# tool installers (opencode, claude-code). `npm update -g` refreshes every
+# globally-installed package to its latest matching semver; `npm doctor`
+# surfaces any registry/perm issues that would silently break later runs.
+do_update_node() {
+    header "Checking & Updating Node + Global Modules"
+    if ! command -v node &>/dev/null; then
+        warn "node not installed — skipping (do_install_latest didn't run?)"
+        return 0
+    fi
+    info "node : $(node --version 2>/dev/null)"
+    info "npm  : $(npm --version 2>/dev/null)"
+
+    if ! command -v npm &>/dev/null; then
+        warn "npm not on PATH — can't refresh global modules."
+        return 0
+    fi
+
+    # Bump npm itself first; older npm versions sometimes can't update newer
+    # packages cleanly.
+    info "Updating npm itself..."
+    npm install -g npm@latest 2>&1 | tail -3 || true
+
+    info "Globally installed packages before update:"
+    npm list -g --depth=0 2>/dev/null | tail -n +2 | sed 's/^/    /' || true
+
+    info "Running 'npm update -g' (this can take a minute)..."
+    npm update -g 2>&1 | tail -5 || true
+
+    info "Globally installed packages after update:"
+    npm list -g --depth=0 2>/dev/null | tail -n +2 | sed 's/^/    /' || true
+
+    log "Node + global modules refreshed."
 }
 
 # ── 7. WIZARD: Static IP ───────────────────────────────────────────────────
@@ -1915,6 +2016,8 @@ show_summary() {
     echo
     echo -e "${MAG}── Core toolchain ──${NC}"
     command -v mc       &>/dev/null && sum_pass "Midnight Commander"  "$(mc --version 2>/dev/null | head -1 | awk '{print $NF}')" || sum_fail "Midnight Commander"
+    command -v tmux     &>/dev/null && sum_pass "tmux"                "$(tmux -V 2>/dev/null | awk '{print $2}')" || sum_fail "tmux"
+    command -v glances  &>/dev/null && sum_pass "glances"             "$(glances --version 2>/dev/null | head -1 | awk '{print $2}')" || sum_skip "glances"
     command -v node     &>/dev/null && sum_pass "Node.js"             "$(node --version 2>/dev/null)" || sum_fail "Node.js"
     command -v npm      &>/dev/null && sum_pass "npm"                 "$(npm --version 2>/dev/null)" || sum_fail "npm"
     command -v git      &>/dev/null && sum_pass "Git"                 "$(git --version 2>/dev/null | awk '{print $3}')" || sum_fail "Git"
@@ -2151,6 +2254,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_update
     do_install
     do_install_mc
+    do_install_tmux
     do_install_extras
     do_install_nettest
     do_install_latest
@@ -2165,11 +2269,13 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_update
     do_install
     do_install_mc
+    do_install_tmux
     do_install_extras
     do_install_nettest
     do_install_latest
     do_install_opencode
     do_install_claude
+    do_update_node
     setup_firewall
     setup_fail2ban
     show_summary
@@ -2190,11 +2296,13 @@ echo
 do_update
 do_install
 do_install_mc
+do_install_tmux
 do_install_extras
 do_install_nettest
 do_install_latest
 do_install_opencode
 do_install_claude
+do_update_node
 
 wizard_static_ip
 wizard_root
