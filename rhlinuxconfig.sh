@@ -2464,6 +2464,70 @@ HEADER
     chmod 644 "$SUMMARY_FILE" "$LOGFILE" 2>/dev/null || true
 }
 
+# ── Global progress bar ─────────────────────────────────────────────────────
+# Each run mode hands its ordered list of step functions to run_steps(), which
+# runs them in turn and draws a single overall progress bar (with %) after each
+# one. The total is just the number of steps for that mode, so the percentage
+# is always "how far through this run am I", not per-step.
+STEP_CURRENT=0
+STEP_TOTAL=0
+
+# Human-readable labels shown on the bar (falls back to the function name).
+declare -A STEP_LABELS=(
+    [do_update]="System update"
+    [do_install]="Base tools"
+    [do_install_mc]="Midnight Commander"
+    [do_install_tmux]="tmux defaults"
+    [do_install_extras]="Extended toolkit"
+    [do_install_nettest]="Network test tools"
+    [do_install_latest]="Node / Git / Python"
+    [do_install_opencode]="opencode"
+    [do_install_claude]="Claude Code"
+    [do_update_node]="Node + global modules"
+    [do_install_gui_apps]="Desktop apps"
+    [wizard_static_ip]="Static IP"
+    [wizard_root]="Root lockdown"
+    [wizard_odin_user]="odin user"
+    [setup_telegram]="Telegram"
+    [setup_wasabi]="Wasabi S3"
+    [setup_wasabi_autobackup]="Wasabi auto-backup"
+    [setup_cloudflare]="Cloudflare DDNS"
+    [setup_firewall]="Firewall"
+    [setup_fail2ban]="Fail2Ban"
+    [post_notify]="Notify"
+)
+
+# Repeat a (possibly multi-byte) string N times — tr can't fill with the UTF-8
+# block glyphs the bar uses, so build it by hand.
+_repeat() { local n="$1" s="$2" out=""; while (( n-- > 0 )); do out+="$s"; done; printf '%s' "$out"; }
+
+draw_progress() {
+    local cur="$1" total="$2" label="${3:-}"
+    if (( total <= 0 )); then return 0; fi
+    (( cur > total )) && cur=$total
+    local pct=$(( cur * 100 / total ))
+    local width=30 filled empty
+    filled=$(( pct * width / 100 ))
+    (( filled > width )) && filled=$width
+    empty=$(( width - filled ))
+    local bar="${GREEN}$(_repeat "$filled" '█')${NC}$(_repeat "$empty" '░')"
+    echo -e "  ${MAG}Progress${NC} [${bar}] ${GREEN}${pct}%${NC}  ${CYAN}(${cur}/${total})${NC}  ${label}"
+    _to_log "PROG" "${pct}% (${cur}/${total}) ${label}"
+}
+
+# run_steps fn1 fn2 ... — execute each step, advancing the global bar after each.
+run_steps() {
+    STEP_TOTAL=$#
+    STEP_CURRENT=0
+    draw_progress 0 "$STEP_TOTAL" "starting ($STEP_TOTAL steps)"
+    local fn
+    for fn in "$@"; do
+        "$fn"
+        STEP_CURRENT=$((STEP_CURRENT + 1))
+        draw_progress "$STEP_CURRENT" "$STEP_TOTAL" "${STEP_LABELS[$fn]:-$fn}"
+    done
+}
+
 # ═══════════════════════════ M A I N ═════════════════════════════════════════
 
 echo -e "${CYAN}"
@@ -2488,14 +2552,8 @@ show_info
 if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     RUN_MODE="quick"
     header "QUICK MODE"
-    do_update
-    do_install
-    do_install_mc
-    do_install_tmux
-    do_install_extras
-    do_install_nettest
-    do_install_latest
-    do_install_gui_apps
+    run_steps do_update do_install do_install_mc do_install_tmux \
+              do_install_extras do_install_nettest do_install_latest do_install_gui_apps
     show_summary
     log "Quick mode done."
     exit 0
@@ -2504,19 +2562,10 @@ fi
 if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     RUN_MODE="unattended"
     header "UNATTENDED MODE"
-    do_update
-    do_install
-    do_install_mc
-    do_install_tmux
-    do_install_extras
-    do_install_nettest
-    do_install_latest
-    do_install_opencode
-    do_install_claude
-    do_update_node
-    do_install_gui_apps
-    setup_firewall
-    setup_fail2ban
+    run_steps do_update do_install do_install_mc do_install_tmux \
+              do_install_extras do_install_nettest do_install_latest \
+              do_install_opencode do_install_claude do_update_node \
+              do_install_gui_apps setup_firewall setup_fail2ban
     show_summary
     auto_reboot
     exit 0
@@ -2532,27 +2581,11 @@ echo -e "${YELLOW}  Timeouts: [Y/n] → ${AUTO_YES_TIMEOUT}s · [y/N] → ${AUTO
 echo -e "${YELLOW}══════════════════════════════════════════════════════════${NC}"
 echo
 
-do_update
-do_install
-do_install_mc
-do_install_tmux
-do_install_extras
-do_install_nettest
-do_install_latest
-do_install_opencode
-do_install_claude
-do_update_node
-do_install_gui_apps
-
-wizard_static_ip
-wizard_root
-wizard_odin_user
-setup_telegram
-setup_wasabi
-setup_wasabi_autobackup
-setup_cloudflare
-setup_firewall
-setup_fail2ban
-post_notify
+run_steps do_update do_install do_install_mc do_install_tmux \
+          do_install_extras do_install_nettest do_install_latest \
+          do_install_opencode do_install_claude do_update_node do_install_gui_apps \
+          wizard_static_ip wizard_root wizard_odin_user \
+          setup_telegram setup_wasabi setup_wasabi_autobackup setup_cloudflare \
+          setup_firewall setup_fail2ban post_notify
 show_summary
 auto_reboot
