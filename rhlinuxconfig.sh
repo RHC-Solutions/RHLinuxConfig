@@ -7,6 +7,7 @@
 # - tmux defaults (/etc/tmux.conf), glances, Midnight Commander
 # - Latest Node / Git / Python, opencode, Claude Code
 # - Refreshes npm + all globally installed npm packages each run
+# - On graphical hosts only: Chrome, Chromium, Edge, Evolution (skipped headless)
 # - Telegram alerts, Wasabi backup, Cloudflare DDNS
 # - UFW / firewalld + Fail2Ban + AbuseIPDB
 # - Static IP, root password/disable, odin user creation
@@ -269,21 +270,61 @@ PACKAGES_CORE="curl wget htop glances mc ncdu btop iftop iotop nethogs net-tools
 PACKAGES_EXTRA=""
 enable_epel() {
     [[ "$OS_FAMILY" != "rhel" ]] && return
-    # Enable EPEL if not already
-    if ! rpm -q epel-release &>/dev/null; then
-        if [[ "$OS_ID" == "almalinux" ]]; then
-            $PKG_INSTALL almalinux-release-epel 2>/dev/null || true
-        elif [[ "$OS_ID" == "rocky" ]]; then
-            $PKG_INSTALL epel-release 2>/dev/null || true
-        elif [[ "$OS_ID" == "centos" ]]; then
-            $PKG_INSTALL epel-release 2>/dev/null || true
-        else
-            $PKG_INSTALL epel-release 2>/dev/null || true
+    # Fedora *is* EPEL's upstream — there's no epel-release to install and CRB
+    # doesn't exist there, so bail out cleanly instead of erroring on both.
+    [[ "$OS_ID" == fedora* ]] && { info "Fedora — EPEL not applicable, skipping."; return; }
+
+    # Major release number drives both the EPEL RPM URL and the CRB repo name
+    # (e.g. 8, 9, 10). arch_name falls back to uname in case ARCH is unset.
+    local rhel_ver arch_name
+    rhel_ver="$(rpm -E %rhel 2>/dev/null)"
+    arch_name="${ARCH:-$(uname -m)}"
+
+    # ── 1. Install epel-release ──────────────────────────────────────────────
+    if ! rpm -q epel-release &>/dev/null \
+       && ! rpm -q "oracle-epel-release-el${rhel_ver}" &>/dev/null; then
+        case "$OS_ID" in
+            almalinux) $PKG_INSTALL almalinux-release-epel 2>/dev/null \
+                           || $PKG_INSTALL epel-release 2>/dev/null || true ;;
+            ol)        $PKG_INSTALL "oracle-epel-release-el${rhel_ver}" 2>/dev/null || true ;;
+            *)         $PKG_INSTALL epel-release 2>/dev/null || true ;;
+        esac
+
+        # True RHEL ships no epel-release in its base/subscription repos — pull
+        # the RPM straight from the Fedora project. Only reached when the repo
+        # install above produced nothing, so it's harmless elsewhere.
+        if ! rpm -q epel-release &>/dev/null \
+           && ! rpm -q "oracle-epel-release-el${rhel_ver}" &>/dev/null \
+           && [[ -n "$rhel_ver" ]]; then
+            info "epel-release not in base repos — installing from dl.fedoraproject.org..."
+            $PKG_INSTALL "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${rhel_ver}.noarch.rpm" 2>/dev/null || true
         fi
     fi
-    # Enable CRB / PowerTools for additional packages
-    dnf config-manager --set-enabled crb 2>/dev/null || \
-        dnf config-manager --set-enabled powertools 2>/dev/null || true
+
+    # ── 2. Enable CodeReady Builder / PowerTools (many EPEL pkgs depend on it) ─
+    # Alma/Rocky/CentOS Stream: repo is `crb` (9/10) or `powertools` (8), both
+    # togglable with config-manager. True RHEL: CRB is a subscription repo only
+    # reachable via subscription-manager. Oracle Linux: olN_codeready_builder.
+    if ! dnf config-manager --set-enabled crb 2>/dev/null \
+       && ! dnf config-manager --set-enabled powertools 2>/dev/null; then
+        case "$OS_ID" in
+            rhel)
+                if command -v subscription-manager &>/dev/null; then
+                    subscription-manager repos --enable \
+                        "codeready-builder-for-rhel-${rhel_ver}-${arch_name}-rpms" 2>/dev/null || true
+                fi ;;
+            ol)
+                dnf config-manager --set-enabled "ol${rhel_ver}_codeready_builder" 2>/dev/null || true ;;
+        esac
+    fi
+
+    # ── 3. Verify ─────────────────────────────────────────────────────────────
+    if rpm -q epel-release &>/dev/null \
+       || rpm -q "oracle-epel-release-el${rhel_ver}" &>/dev/null; then
+        log "EPEL enabled (${OS_ID} ${rhel_ver:-?})."
+    else
+        warn "EPEL could not be enabled — some extended packages may be unavailable."
+    fi
 }
 
 resolve_pkg_list() {
@@ -1182,6 +1223,188 @@ do_update_node() {
     log "Node + global modules refreshed."
 }
 
+# ── 6.6 Desktop browsers + mail (only when a GUI is already installed) ──────
+# Servers stay lean: this whole step is skipped on headless boxes. When a
+# desktop environment IS present we add Google Chrome, Chromium, Microsoft
+# Edge, and Evolution. Chrome/Edge come from their official vendor repos so
+# they keep updating with the rest of the system; Chromium + Evolution are in
+# the distro repos (Chromium via EPEL on the RHEL family, enabled earlier).
+GUI_DETECTED=""
+_gui_present() {
+    GUI_DETECTED=""
+    # 1. systemd boots to a graphical session.
+    if command -v systemctl &>/dev/null; then
+        [[ "$(systemctl get-default 2>/dev/null)" == "graphical.target" ]] \
+            && GUI_DETECTED="graphical.target"
+    fi
+    # 2. A display manager is enabled or running.
+    if [[ -z "$GUI_DETECTED" ]] && command -v systemctl &>/dev/null; then
+        local dm
+        for dm in gdm gdm3 sddm lightdm lxdm xdm slim greetd ly nodm; do
+            if systemctl is-enabled "$dm" &>/dev/null || systemctl is-active "$dm" &>/dev/null; then
+                GUI_DETECTED="$dm"; break
+            fi
+        done
+    fi
+    # 3. A desktop/WM session file is installed (X11 or Wayland).
+    if [[ -z "$GUI_DETECTED" ]]; then
+        shopt -s nullglob
+        local sessions=(/usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop)
+        shopt -u nullglob
+        [[ ${#sessions[@]} -gt 0 ]] && GUI_DETECTED="$(basename "${sessions[0]}" .desktop) session"
+    fi
+    # 4. An X / Wayland server binary is on PATH.
+    if [[ -z "$GUI_DETECTED" ]]; then
+        local b
+        for b in Xorg Xwayland X; do
+            command -v "$b" &>/dev/null && { GUI_DETECTED="$b"; break; }
+        done
+    fi
+    [[ -n "$GUI_DETECTED" ]]
+}
+
+_install_evolution() {
+    if command -v evolution &>/dev/null; then
+        log "Evolution already installed."
+        return 0
+    fi
+    info "Installing Evolution (mail/calendar)..."
+    pkg_install evolution
+    command -v evolution &>/dev/null \
+        && log "Evolution installed." \
+        || warn "Evolution: not available in $OS_FAMILY repos — skipped."
+}
+
+_install_chromium() {
+    if command -v chromium &>/dev/null || command -v chromium-browser &>/dev/null; then
+        log "Chromium already installed."
+        return 0
+    fi
+    info "Installing Chromium..."
+    case "$OS_FAMILY" in
+        debian)
+            # Debian ships `chromium`; Ubuntu ships `chromium-browser`
+            # (transitional → snap). Install whichever the index knows.
+            if apt-cache show chromium &>/dev/null; then pkg_install chromium
+            else pkg_install chromium-browser; fi ;;
+        rhel)  pkg_install chromium ;;   # from EPEL (enabled in do_install)
+        arch)  pkg_install chromium ;;
+        suse)  pkg_install chromium ;;
+    esac
+    if command -v chromium &>/dev/null || command -v chromium-browser &>/dev/null; then
+        log "Chromium installed."
+    else
+        warn "Chromium: not available in $OS_FAMILY repos — skipped."
+    fi
+}
+
+_install_chrome() {
+    if command -v google-chrome &>/dev/null || command -v google-chrome-stable &>/dev/null; then
+        log "Google Chrome already installed."
+        return 0
+    fi
+    # Google only ships a 64-bit x86 Linux build — Chromium covers other arches.
+    if [[ "$ARCH" != "x86_64" && "$ARCH" != "amd64" ]]; then
+        warn "Google Chrome has no Linux build for $ARCH — skipping (Chromium covers it)."
+        return 0
+    fi
+    info "Installing Google Chrome (stable)..."
+    case "$OS_FAMILY" in
+        debian)
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+                | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg 2>/dev/null || true
+            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
+                > /etc/apt/sources.list.d/google-chrome.list
+            wait_for_apt_lock; eval "$PKG_UPDATE" 2>/dev/null || true
+            wait_for_apt_lock; $PKG_INSTALL google-chrome-stable 2>&1 | tail -3 || true ;;
+        rhel)
+            cat > /etc/yum.repos.d/google-chrome.repo <<'REPO'
+[google-chrome]
+name=google-chrome
+baseurl=https://dl.google.com/linux/chrome/rpm/stable/x86_64
+enabled=1
+gpgcheck=1
+gpgkey=https://dl.google.com/linux/linux_signing_key.pub
+REPO
+            $PKG_INSTALL google-chrome-stable 2>&1 | tail -3 || true ;;
+        suse)
+            rpm --import https://dl.google.com/linux/linux_signing_key.pub 2>/dev/null || true
+            zypper --non-interactive addrepo --refresh \
+                http://dl.google.com/linux/chrome/rpm/stable/x86_64 google-chrome 2>/dev/null || true
+            zypper --non-interactive --gpg-auto-import-keys refresh 2>/dev/null || true
+            zypper install -y google-chrome-stable 2>&1 | tail -3 || true ;;
+        arch)
+            warn "Google Chrome is AUR-only on Arch — skipping (install 'google-chrome' via an AUR helper)."
+            return 0 ;;
+    esac
+    if command -v google-chrome &>/dev/null || command -v google-chrome-stable &>/dev/null; then
+        log "Google Chrome installed."
+    else
+        warn "Google Chrome install failed."
+    fi
+}
+
+_install_edge() {
+    if command -v microsoft-edge &>/dev/null || command -v microsoft-edge-stable &>/dev/null; then
+        log "Microsoft Edge already installed."
+        return 0
+    fi
+    case "$ARCH" in
+        x86_64|amd64|aarch64|arm64) ;;
+        *) warn "Microsoft Edge has no Linux build for $ARCH — skipping."; return 0 ;;
+    esac
+    info "Installing Microsoft Edge (stable)..."
+    case "$OS_FAMILY" in
+        debian)
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+                | gpg --dearmor -o /etc/apt/keyrings/microsoft-edge.gpg 2>/dev/null || true
+            echo "deb [signed-by=/etc/apt/keyrings/microsoft-edge.gpg] https://packages.microsoft.com/repos/edge stable main" \
+                > /etc/apt/sources.list.d/microsoft-edge.list
+            wait_for_apt_lock; eval "$PKG_UPDATE" 2>/dev/null || true
+            wait_for_apt_lock; $PKG_INSTALL microsoft-edge-stable 2>&1 | tail -3 || true ;;
+        rhel)
+            rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
+            cat > /etc/yum.repos.d/microsoft-edge.repo <<'REPO'
+[microsoft-edge]
+name=microsoft-edge
+baseurl=https://packages.microsoft.com/yumrepos/edge
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+REPO
+            $PKG_INSTALL microsoft-edge-stable 2>&1 | tail -3 || true ;;
+        suse)
+            rpm --import https://packages.microsoft.com/keys/microsoft.asc 2>/dev/null || true
+            zypper --non-interactive addrepo --refresh \
+                https://packages.microsoft.com/yumrepos/edge microsoft-edge 2>/dev/null || true
+            zypper --non-interactive --gpg-auto-import-keys refresh 2>/dev/null || true
+            zypper install -y microsoft-edge-stable 2>&1 | tail -3 || true ;;
+        arch)
+            warn "Microsoft Edge is AUR-only on Arch — skipping (install 'microsoft-edge-stable-bin' via an AUR helper)."
+            return 0 ;;
+    esac
+    if command -v microsoft-edge &>/dev/null || command -v microsoft-edge-stable &>/dev/null; then
+        log "Microsoft Edge installed."
+    else
+        warn "Microsoft Edge install failed."
+    fi
+}
+
+do_install_gui_apps() {
+    header "Desktop Apps (Chrome / Chromium / Edge / Evolution)"
+    if ! _gui_present; then
+        info "No graphical desktop detected — skipping desktop apps (headless server)."
+        return 0
+    fi
+    log "GUI detected ($GUI_DETECTED) — installing desktop browsers + mail."
+    _install_chromium
+    _install_chrome
+    _install_edge
+    _install_evolution
+}
+
 # ── 7. WIZARD: Static IP ───────────────────────────────────────────────────
 wizard_static_ip() {
     header "Network Configuration (DHCP → Static IP)"
@@ -2063,6 +2286,20 @@ show_summary() {
     [[ -x /usr/local/bin/cloudflare-dns ]]        && sum_pass "Cloudflare DDNS"      "installed" || sum_skip "Cloudflare DDNS"
     [[ -f /etc/fail2ban/action.d/abuseipdb.conf ]] && sum_pass "AbuseIPDB reporting" "active" || sum_skip "AbuseIPDB reporting"
 
+    # Desktop apps — only relevant (and only installed) when a GUI is present.
+    if _gui_present; then
+        echo
+        echo -e "${MAG}── Desktop apps (GUI: $GUI_DETECTED) ──${NC}"
+        { command -v google-chrome &>/dev/null || command -v google-chrome-stable &>/dev/null; } \
+            && sum_pass "Google Chrome" "installed" || sum_skip "Google Chrome"
+        { command -v chromium &>/dev/null || command -v chromium-browser &>/dev/null; } \
+            && sum_pass "Chromium" "installed" || sum_skip "Chromium"
+        { command -v microsoft-edge &>/dev/null || command -v microsoft-edge-stable &>/dev/null; } \
+            && sum_pass "Microsoft Edge" "installed" || sum_skip "Microsoft Edge"
+        command -v evolution &>/dev/null \
+            && sum_pass "Evolution" "installed" || sum_skip "Evolution"
+    fi
+
     echo
     echo -e "${MAG}── Summary ──${NC}"
     echo -e "  ${GREEN}✓ ${SUM_OK} OK${NC}   ${RED}✗ ${SUM_FAIL} failed${NC}   ${YELLOW}- ${SUM_SKIP} skipped${NC}"
@@ -2258,6 +2495,7 @@ if [[ $# -eq 1 && "$1" == "--quick" ]]; then
     do_install_extras
     do_install_nettest
     do_install_latest
+    do_install_gui_apps
     show_summary
     log "Quick mode done."
     exit 0
@@ -2276,6 +2514,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     do_install_opencode
     do_install_claude
     do_update_node
+    do_install_gui_apps
     setup_firewall
     setup_fail2ban
     show_summary
@@ -2303,6 +2542,7 @@ do_install_latest
 do_install_opencode
 do_install_claude
 do_update_node
+do_install_gui_apps
 
 wizard_static_ip
 wizard_root
