@@ -1265,12 +1265,70 @@ do_update_node() {
 }
 
 # ── 7. WIZARD: Static IP ───────────────────────────────────────────────────
+# Detect whether the primary interface already has a static (non-DHCP) address.
+# Returns 0 when static and sets STATIC_IP_METHOD to a "<method> (<source>)"
+# description; returns 1 for DHCP / unconfigured. Used both to skip the wizard
+# prompt and to report the method in the final status block.
+STATIC_IP_METHOD=""
+_static_ip_configured() {
+    STATIC_IP_METHOD=""
+    local iface f
+    iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+
+    # NetworkManager: ipv4.method == manual on the interface's active connection.
+    if command -v nmcli &>/dev/null; then
+        local conn method
+        conn=$(nmcli -t -f NAME,DEVICE -e no connection show --active 2>/dev/null \
+                | awk -F: -v d="$iface" '$2==d{print $1; exit}')
+        if [[ -n "$conn" ]]; then
+            method=$(nmcli -t -f ipv4.method connection show "$conn" 2>/dev/null | cut -d: -f2)
+            [[ "$method" == "manual" ]] && { STATIC_IP_METHOD="NetworkManager ($conn)"; return 0; }
+        fi
+    fi
+
+    # netplan: DHCP explicitly disabled.
+    if grep -lEq 'dhcp4:[[:space:]]*(false|no)' /etc/netplan/*.yaml 2>/dev/null; then
+        STATIC_IP_METHOD="netplan ($(grep -lE 'dhcp4:[[:space:]]*(false|no)' /etc/netplan/*.yaml 2>/dev/null | head -1))"
+        return 0
+    fi
+
+    # /etc/network/interfaces: an "inet static" stanza.
+    if grep -Eq '^[[:space:]]*iface[[:space:]]+\S+[[:space:]]+inet[[:space:]]+static' \
+        /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null; then
+        STATIC_IP_METHOD="interfaces (/etc/network/interfaces)"
+        return 0
+    fi
+
+    # RHEL / SUSE ifcfg: BOOTPROTO static or none (skip loopback).
+    for f in /etc/sysconfig/network-scripts/ifcfg-* /etc/sysconfig/network/ifcfg-*; do
+        [[ -f "$f" && "$f" != *ifcfg-lo ]] || continue
+        grep -Eiq '^BOOTPROTO=["'\'']?(static|none)' "$f" && { STATIC_IP_METHOD="ifcfg ($f)"; return 0; }
+    done
+
+    # systemd-networkd: a static Address= with no DHCP enabled.
+    for f in /etc/systemd/network/*.network; do
+        [[ -f "$f" ]] || continue
+        if grep -Eiq '^Address=' "$f" && ! grep -Eiq '^DHCP=(yes|ipv4|ipv6|true)' "$f"; then
+            STATIC_IP_METHOD="systemd-networkd ($f)"; return 0
+        fi
+    done
+
+    return 1
+}
+
 wizard_static_ip() {
     header "Network Configuration (DHCP → Static IP)"
     local iface current_ip current_gw
     iface=$(ip route | awk '/default/{print $5; exit}')
     current_ip=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet/{print $2}' | cut -d/ -f1)
     current_gw=$(ip route | awk "/default via.*$iface/"'{print $3}')
+
+    # Already static — don't touch the network; it'll be shown in the status block.
+    if _static_ip_configured; then
+        log "Static IP already configured via $STATIC_IP_METHOD — leaving network untouched."
+        echo "Interface: $iface  IP: ${current_ip:-unknown}  GW: ${current_gw:-unknown}"
+        return
+    fi
 
     echo "Current interface: $iface  IP: ${current_ip:-DHCP}  GW: ${current_gw:-unknown}"
     echo
@@ -2256,12 +2314,10 @@ SSH keys (odin)   : $([[ -f /home/odin/.ssh/authorized_keys ]] && wc -l < /home/
 NETWORK
 ──────────────────────────────────────────────────────────────────────────────
 Default interface : $(ip route 2>/dev/null | awk '/default/{print $5; exit}')
+IPv4 address      : $(ip -4 addr show "$(ip route 2>/dev/null | awk '/default/{print $5; exit}')" 2>/dev/null | awk '/inet/{print $2; exit}')
 Default gateway   : $(ip route 2>/dev/null | awk '/default/{print $3; exit}')
 DNS servers       : $(grep '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
-IP config method  : $(if grep -lq 'BOOTPROTO=static' /etc/sysconfig/network-scripts/ifcfg-* 2>/dev/null \
-                          || grep -lq 'dhcp4: false' /etc/netplan/*.yaml 2>/dev/null; then
-                      echo "static"
-                    else echo "DHCP"; fi)
+IP config method  : $(if _static_ip_configured; then echo "static — $STATIC_IP_METHOD"; else echo "DHCP"; fi)
 
 ──────────────────────────────────────────────────────────────────────────────
 CLOUD INTEGRATIONS

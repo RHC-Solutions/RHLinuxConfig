@@ -104,7 +104,7 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 ### Interactive wizards (full mode only)
 | # | Step | Detail |
 |---|------|--------|
-| 15 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
+| 15 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro. If a static IP is **already configured** (NetworkManager `manual`, netplan `dhcp4: false`, `inet static`, `BOOTPROTO=static/none`, or a systemd-networkd `Address=`), the wizard skips the prompt and leaves the network untouched — the active address and method are shown in the final status block. |
 | 16 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
 | 17 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
 | 18 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
