@@ -71,12 +71,13 @@ err()   { echo -e "${RED}[✗]${NC}  $*"; _to_log "ERR " "$*"; }
 info()  { echo -e "${CYAN}[i]${NC}  $*"; _to_log "INFO" "$*"; }
 header(){ echo -e "\n${MAG}══ $* ══${NC}"; printf '\n══ %s ══\n' "$*" >> "$LOGFILE"; }
 # Prompt timeouts (set any to 0 to wait forever):
-#   AUTO_YES_TIMEOUT   — safe [Y/n] prompts (default already yes, e.g. "change
+#   AUTO_YES_TIMEOUT   — safe [Y/n] prompts (default 60s, e.g. "change
 #                        root password?"). Auto-accepts on timeout.
-#   AUTO_NO_TIMEOUT    — opt-in [y/N] prompts (cloud setup, static IP, etc.).
-#                        Auto-declines on timeout.
-#   AUTO_TEXT_TIMEOUT  — text input prompts (IP address, gateway, etc.).
-#                        Falls through to the bracketed default on timeout.
+#   AUTO_NO_TIMEOUT    — opt-in [y/N] prompts (default 60s; cloud setup,
+#                        static IP, etc.). Auto-declines on timeout.
+#   AUTO_TEXT_TIMEOUT  — text input prompts (default 60s; IP address,
+#                        gateway, etc.). Falls through to the bracketed
+#                        default on timeout.
 AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-60}"
 AUTO_NO_TIMEOUT="${AUTO_NO_TIMEOUT:-60}"
 AUTO_TEXT_TIMEOUT="${AUTO_TEXT_TIMEOUT:-60}"
@@ -86,12 +87,14 @@ prompt(){
     local varname="${1:-}"
 
     # Detect prompt type, default answer, and timeout:
-    #   "[Y/n]" → confirmation, default YES → auto-answer "y" after 5s
-    #   "[y/N]" → confirmation, default NO  → auto-answer "n" after 30s
-    #     (long window so the operator can read a multi-line wizard intro
-    #     and opt in by typing 'y'; the previous 5s was too tight)
-    #   "[y/n]" or "[Y/N]" → no explicit default → "n" after 30s
-    #   anything else → text input, "" after 5s so "${var:-default}" wins
+    #   "[Y/n]" → confirmation, default YES → auto-answer "y" after
+    #     AUTO_YES_TIMEOUT seconds
+    #   "[y/N]" → confirmation, default NO  → auto-answer "n" after
+    #     AUTO_NO_TIMEOUT seconds
+    #   "[y/n]" or "[Y/N]" → no explicit default → "n" after
+    #     AUTO_NO_TIMEOUT seconds
+    #   anything else → text input, "" after AUTO_TEXT_TIMEOUT seconds so
+    #     "${var:-default}" wins
     local is_confirm="" timeout_default="" timeout_secs="$AUTO_TEXT_TIMEOUT"
     if   [[ "$msg" =~ \[Y/n\] ]]; then is_confirm=1; timeout_default="y"; timeout_secs="$AUTO_YES_TIMEOUT"
     elif [[ "$msg" =~ \[y/N\] ]]; then is_confirm=1; timeout_default="n"; timeout_secs="$AUTO_NO_TIMEOUT"
@@ -226,6 +229,9 @@ detect_distro() {
             PKG_INSTALL_NQ="pacman -S --noconfirm"
             PKG_UPDATE="pacman -Sy"
             PKG_UPGRADE="pacman -Syu --noconfirm"
+            # NOTE: \$(...) is escaped on purpose — PKG_AUTOREMOVE is run via
+            # `eval`, so the orphan lookup must defer to eval time, not expand
+            # here at assignment time (when pacman may be absent / nothing to do).
             PKG_AUTOREMOVE="pacman -Rns --noconfirm \$(pacman -Qdtq 2>/dev/null) 2>/dev/null || true"
             PKG_CHECK="pacman -Q"
             PKG_SEARCH="pacman -Ss"
@@ -266,7 +272,10 @@ detect_distro() {
 }
 
 # ── Distro-specific package maps ────────────────────────────────────────────
-PACKAGES_CORE="curl wget htop glances mc ncdu btop iftop iotop nethogs net-tools smartmontools sysstat dstat iperf3 mtr-tiny screen tmux unzip zip gpg jq tree rsync"
+PACKAGES_CORE="\
+curl wget htop glances mc ncdu btop iftop iotop nethogs \
+net-tools smartmontools sysstat dstat iperf3 mtr-tiny \
+screen tmux unzip zip gpg jq tree rsync"
 
 # Packages that differ by family (set after detect_distro)
 PACKAGES_EXTRA=""
@@ -515,7 +524,9 @@ EOF
 
 # ── Helper: generate random password ────────────────────────────────────────
 gen_pass() {
-    tr -dc 'A-Za-z0-9_!@#%^&*()' < /dev/urandom 2>/dev/null | head -c 20
+    # Charset size is ~72 symbols; 24 chars yields ~148 bits of entropy
+    # (24 * log2(72)), improving over the previous 20-char default.
+    tr -dc 'A-Za-z0-9_!@#%^&*()' < /dev/urandom 2>/dev/null | head -c 24
     echo
 }
 
