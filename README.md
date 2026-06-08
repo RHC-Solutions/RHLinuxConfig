@@ -72,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/RHC-Solutions/RHLinuxConfig/main/rh
 | **Arch** | Arch, Manjaro, EndeavourOS, Garuda | `pacman` | UFW | `wheel` |
 | **SUSE** | openSUSE, SLES | `zypper` | firewalld | `wheel` |
 
-Detection falls back to `ID_LIKE` for unknown derivatives. All package names, network-config files, and firewall commands adapt automatically.
+Detection falls back to `ID_LIKE` for unknown derivatives. All package names, network-config files, and firewall commands adapt automatically. The **Firewall** column is the default backend; the firewall step also supports **iptables** (auto-fallback when ufw/firewalld is absent) and honors a `FW_TOOL=ufw|firewalld|iptables` override.
 
 ---
 
@@ -111,8 +111,9 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | 19 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
 | 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
 | 21 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
-| 22 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
-| 23 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
+| 22 | **Disable IPv6** | Writes `/etc/sysctl.d/99-rhlc-disable-ipv6.conf` (all/default/lo `disable_ipv6 = 1`), applies immediately via `sysctl --system`, and sets `ip6tables` to DROP. IPv4-only, no reboot, reversible by deleting the drop-in. |
+| 23 | **Firewall** | **ufw / firewalld / iptables** (auto-detected per distro; falls back to iptables and installs it if neither is present; override with `FW_TOOL=…`). Default-deny inbound. **Prompts for admin IP(s)** (pre-filled with your current SSH client) and allows **SSH only from those** sources. **443/tcp** is opened **only from [Cloudflare's published IPv4 ranges](https://www.cloudflare.com/ips-v4)** plus the admin IPs. **Port 80 is never opened.** iptables rules are persisted per-distro. |
+| 24 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting. Ban action matches the backend (`ufw` / `firewallcmd-rich-rules` / `iptables-multiport`). |
 
 ---
 
@@ -173,6 +174,10 @@ glances                                         # top alternative, also exposes 
 /etc/fail2ban/jail.local              # SSH + firewall jails
 /etc/fail2ban/action.d/abuseipdb.conf # (if AbuseIPDB key given)
 
+/etc/sysctl.d/99-rhlc-disable-ipv6.conf  # IPv6 off (delete to restore)
+/etc/rhlc/cloudflare-ips-v4.txt          # cached Cloudflare IPv4 ranges (443 allow-list)
+/etc/iptables/rules.v4 · /etc/sysconfig/iptables  # persisted iptables rules (when FW_TOOL=iptables)
+
 /etc/sudoers.d/odin                   # odin = passwordless sudo
 /root/.aws/credentials                # Wasabi keys (chmod 600)
 /var/log/wasabi-backup.log            # Daily backup log
@@ -194,7 +199,9 @@ glances                                         # top alternative, also exposes 
 The script is a single Bash file — read top-to-bottom, all functions are commented. Key extension points:
 
 - **Add a package to the base install** → append to `PACKAGES_CORE` near the top of the script
-- **Change firewall ports prompted** → edit the loop in `setup_firewall()`
+- **Change the firewall policy** (ports, allowed sources, backends) → edit `setup_firewall()` and the `_fw_*` helpers
+- **Refresh the Cloudflare IP allow-list** → re-run the firewall step; ranges are fetched from `cloudflare.com/ips-v4` and cached at `/etc/rhlc/cloudflare-ips-v4.txt`
+- **Re-enable IPv6** → delete `/etc/sysctl.d/99-rhlc-disable-ipv6.conf` and run `sysctl --system` (reboot to be safe)
 - **Skip a wizard step** → comment out the corresponding line in the `# Wizard: Interactive Setup` block at the bottom
 - **Add a custom step** → write a `setup_foo()` function and call it from the main flow
 
@@ -210,7 +217,9 @@ Distro-specific behavior lives in `case "$OS_FAMILY"` blocks — add a new arm (
 | `Unable to locate package <name>` | The wizard now warns and skips (`[!] Not in <pkg_mgr> index, skipping: …`) instead of aborting. If you're running an older copy: re-curl with `curl -fsSL ".../rhlinuxconfig.sh?v=$(date +%s)" -o /tmp/rhlinuxconfig.sh`. |
 | ipinfo.io step warns "unreachable" | Check outbound HTTPS / DNS. Script continues; set timezone manually with `timedatectl set-timezone Europe/Berlin` |
 | `claude` not in `$PATH` after install | `source /etc/profile.d/claude-code.sh` or open a new shell |
-| Locked out via UFW after enabling | Boot single-user, `ufw allow ssh && ufw reload` |
+| Locked out after firewall step (wrong admin IP) | Use the provider's web/serial console. ufw: `ufw allow ssh`. firewalld: `firewall-cmd --add-service=ssh`. iptables: `iptables -I INPUT -p tcp --dport 22 -j ACCEPT`. The firewall pre-fills your current SSH client as the admin IP to avoid this. |
+| Origin server unreachable over HTTPS | Port 443 is allowed **only from Cloudflare ranges + admin IPs** — direct access from elsewhere is blocked by design. Add a source rule or proxy through Cloudflare. |
+| Need IPv6 back | Delete `/etc/sysctl.d/99-rhlc-disable-ipv6.conf`, run `sudo sysctl --system`, then reboot. |
 | Telegram test message fails | Token from `@BotFather` correct? Did you `/start` the bot in a DM first to get the chat ID? |
 | Wasabi backup says bucket inaccessible | Check region — endpoint is `s3.<region>.wasabisys.com`, default is `us-east-1` |
 | Cloudflare DDNS "Update failed" | Token needs **DNS:Edit** for the specific zone, not just account-level |
@@ -226,7 +235,9 @@ Logs:
 
 - The script **changes the root password** if you accept the prompt — write it down (or copy the generated `odin` password) before logging out.
 - `wizard_static_ip` rewrites network config files; you can lose connectivity if the IP/gateway is wrong. Have console access ready.
-- `--unattended` skips wizards but **does** enable firewall + fail2ban. SSH stays open; nothing else.
+- **The firewall step can lock you out.** SSH is restricted to the admin IP(s) you enter (pre-filled with your current SSH client). If you supply a wrong IP — or none while connected via a NATed/changing address — you may lose access. Keep a provider console open until you've confirmed a fresh SSH session works. If no admin IP is given, SSH is left open to all to avoid a hard lockout.
+- The firewall **disables IPv6** and **closes port 80**, and opens **443 only to Cloudflare ranges + your admin IPs**. If your service must be reachable directly (not via Cloudflare) or over IPv6, adjust `setup_firewall()` / re-enable IPv6 first.
+- `--unattended` skips the interactive wizards but **does** run disable-IPv6, firewall, and fail2ban. The firewall prompt auto-resolves to your detected SSH client (or, if none, leaves SSH open).
 - Generated passwords are printed once to the terminal and not stored anywhere. Capture them at the time.
 
 ---

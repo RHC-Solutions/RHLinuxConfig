@@ -8,7 +8,9 @@
 # - Latest Node / Git / Python, opencode, Claude Code, Codex CLI, Gemini CLI
 # - Refreshes npm + all globally installed npm packages each run
 # - Telegram alerts, Wasabi backup, Cloudflare DDNS
-# - UFW / firewalld + Fail2Ban + AbuseIPDB
+# - Firewall (UFW / firewalld / iptables) + Fail2Ban + AbuseIPDB:
+#     SSH restricted to admin IPs, 443 from Cloudflare ranges (+admin),
+#     port 80 closed, IPv6 disabled (IPv4-only server)
 # - Static IP, root password/disable, odin user creation
 # Behaviors worth knowing:
 # - Prompts show a live "[Ns]" countdown; safe [Y/n] → 5s default-yes,
@@ -191,7 +193,7 @@ detect_distro() {
             PKG_SEARCH="apt-cache search"
             PKG_REPO_ADD="add-apt-repository -y"
             NETPLAN_BIN="netplan"
-            FW_TOOL="ufw"
+            FW_TOOL="${FW_TOOL:-ufw}"
             FIREWALL_PKG="ufw"
             SENSORS_PKG="lm-sensors"
             DEV_GROUP="sudo"
@@ -212,7 +214,7 @@ detect_distro() {
             PKG_REPO_ADD="dnf config-manager --set-enabled"
             NETPLAN_BIN=""
             FIREWALL_PKG="firewalld"
-            FW_TOOL="firewalld"
+            FW_TOOL="${FW_TOOL:-firewalld}"
             SENSORS_PKG="lm_sensors"
             DEV_GROUP="wheel"
             ;;
@@ -227,7 +229,7 @@ detect_distro() {
             PKG_SEARCH="pacman -Ss"
             PKG_REPO_ADD=""
             NETPLAN_BIN=""
-            FW_TOOL="ufw"
+            FW_TOOL="${FW_TOOL:-ufw}"
             FIREWALL_PKG="ufw"
             SENSORS_PKG="lm_sensors"
             DEV_GROUP="wheel"
@@ -243,7 +245,7 @@ detect_distro() {
             PKG_SEARCH="zypper search"
             PKG_REPO_ADD="zypper addrepo"
             NETPLAN_BIN=""
-            FW_TOOL="firewalld"
+            FW_TOOL="${FW_TOOL:-firewalld}"
             FIREWALL_PKG="firewalld"
             SENSORS_PKG="lm_sensors"
             DEV_GROUP="wheel"
@@ -1930,36 +1932,199 @@ CRON
     echo "         cloudflare-dns --ip 1.2.3.4      # specify IP manually"
 }
 
+# ── 13.5 Disable IPv6 (sysctl-based, no reboot) ─────────────────────────────
+# Turns off the IPv6 stack on every interface so the server is IPv4-only.
+# Persistent via /etc/sysctl.d and applied immediately; fully reversible by
+# deleting the drop-in. ip6tables is also set to DROP as a safety net.
+disable_ipv6() {
+    header "Disabling IPv6"
+    cat > /etc/sysctl.d/99-rhlc-disable-ipv6.conf <<'SYSCTL'
+# Managed by RHLinuxConfig — IPv4-only server. Delete this file and run
+# `sysctl --system` (then reboot) to restore IPv6.
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+SYSCTL
+    sysctl --system &>/dev/null || true
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -P INPUT DROP   2>/dev/null || true
+        ip6tables -P FORWARD DROP 2>/dev/null || true
+        ip6tables -P OUTPUT DROP  2>/dev/null || true
+        ip6tables -F              2>/dev/null || true
+    fi
+    if [[ -z "$(ip -6 addr show scope global 2>/dev/null)" ]]; then
+        log "IPv6 disabled (no global IPv6 addresses remain)."
+    else
+        warn "IPv6 sysctl applied, but a global IPv6 address is still present — a reboot may be needed."
+    fi
+}
+
 # ── 14. Firewall + Fail2Ban + AbuseIPDB ────────────────────────────────────
+# Resolve which firewall backend to actually use. Honors a pre-set FW_TOOL env
+# var (ufw|firewalld|iptables); otherwise prefers the distro default when its
+# binary is present, and falls back to iptables — installing it if nothing else
+# is available.
+_resolve_fw_tool() {
+    case "$FW_TOOL" in
+        ufw)       command -v ufw &>/dev/null          && return 0 ;;
+        firewalld) command -v firewall-cmd &>/dev/null && return 0 ;;
+        iptables)  command -v iptables &>/dev/null && return 0
+                   _install_iptables_stack; return 0 ;;
+    esac
+    warn "$FW_TOOL not available — picking an installed backend."
+    if   command -v ufw &>/dev/null;          then FW_TOOL="ufw"
+    elif command -v firewall-cmd &>/dev/null; then FW_TOOL="firewalld"
+    elif command -v iptables &>/dev/null;     then FW_TOOL="iptables"
+    else FW_TOOL="iptables"; _install_iptables_stack; fi
+    log "Firewall backend: $FW_TOOL"
+}
+
+_install_iptables_stack() {
+    command -v iptables &>/dev/null && command -v iptables-save &>/dev/null && return 0
+    info "Installing iptables + persistence..."
+    case "$OS_FAMILY" in
+        debian) DEBIAN_FRONTEND=noninteractive pkg_install iptables iptables-persistent netfilter-persistent ;;
+        rhel)   pkg_install iptables iptables-services ;;
+        arch)   pkg_install iptables ;;
+        suse)   pkg_install iptables ;;
+    esac
+}
+
+# Persist the live iptables/ip6tables ruleset across reboots, per distro.
+_persist_iptables() {
+    case "$OS_FAMILY" in
+        debian)
+            install -d -m 0755 /etc/iptables
+            iptables-save  > /etc/iptables/rules.v4 2>/dev/null || true
+            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+            command -v netfilter-persistent &>/dev/null && netfilter-persistent save 2>/dev/null || true
+            systemctl enable netfilter-persistent 2>/dev/null || true ;;
+        rhel)
+            iptables-save  > /etc/sysconfig/iptables 2>/dev/null || true
+            ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null || true
+            systemctl enable iptables 2>/dev/null || true ;;
+        arch)
+            install -d -m 0755 /etc/iptables
+            iptables-save  > /etc/iptables/iptables.rules 2>/dev/null || true
+            ip6tables-save > /etc/iptables/ip6tables.rules 2>/dev/null || true
+            systemctl enable iptables 2>/dev/null || true ;;
+        suse)
+            iptables-save  > /etc/sysconfig/iptables 2>/dev/null || true ;;
+    esac
+}
+
+# SSH port from sshd_config (defaults to 22).
+_sshd_port() {
+    local p
+    p=$(awk '/^[Pp]ort[[:space:]]+[0-9]+/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    echo "${p:-22}"
+}
+
+# Ask for the admin IP(s)/CIDRs allowed to SSH in. Pre-fills with the current
+# SSH client so a remote operator can't lock themselves out by accident.
+ADMIN_IPS=""
+_collect_admin_ips() {
+    local detected ans
+    detected=$(awk '{print $1}' <<<"${SSH_CONNECTION:-}")
+    [[ -z "$detected" ]] && detected=$(awk '{print $1}' <<<"${SSH_CLIENT:-}")
+    echo "SSH ($(_sshd_port)/tcp) will be restricted to the admin IP(s) you list."
+    echo "Space-separated IPv4 addresses or CIDRs, e.g.:  203.0.113.4 198.51.100.0/24"
+    [[ -n "$detected" ]] && echo "Detected your current SSH client: $detected"
+    prompt "Admin IP(s) for SSH [${detected:-none}]: " ans
+    ADMIN_IPS="${ans:-$detected}"
+}
+
+# Fetch Cloudflare's published IPv4 ranges (cached for reuse / offline runs).
+CF_V4_FILE="/etc/rhlc/cloudflare-ips-v4.txt"
+_fetch_cloudflare_ips() {
+    install -d -m 0755 /etc/rhlc
+    if curl -fsSL --max-time 15 https://www.cloudflare.com/ips-v4 -o "${CF_V4_FILE}.tmp" \
+        && [[ -s "${CF_V4_FILE}.tmp" ]]; then
+        mv "${CF_V4_FILE}.tmp" "$CF_V4_FILE"
+        log "Fetched $(grep -c . "$CF_V4_FILE") Cloudflare IPv4 ranges."
+        return 0
+    fi
+    rm -f "${CF_V4_FILE}.tmp"
+    [[ -s "$CF_V4_FILE" ]] && { warn "Cloudflare fetch failed — using cached list ($CF_V4_FILE)."; return 0; }
+    warn "Could not fetch Cloudflare IP list and no cache — 443 will NOT be opened."
+    return 1
+}
+
+# SSH from admin IPs, 443 from Cloudflare (+admin), no port 80, IPv6 off.
 setup_firewall() {
+    _resolve_fw_tool
     header "Firewall Setup ($FW_TOOL)"
+
+    local sshd_port have_cf=0 ip cidr
+    sshd_port=$(_sshd_port)
+    _collect_admin_ips
+    _fetch_cloudflare_ips && have_cf=1
+    [[ -z "$ADMIN_IPS" ]] && warn "No admin IPs given — leaving SSH open to all sources to avoid lockout."
+
+    # Sources allowed to reach 443: Cloudflare ranges plus the admin IPs.
+    local https_srcs=()
+    [[ "$have_cf" -eq 1 ]] && while read -r cidr || [[ -n "$cidr" ]]; do [[ -n "$cidr" ]] && https_srcs+=("$cidr"); done < "$CF_V4_FILE"
+    [[ -n "$ADMIN_IPS" ]] && for ip in $ADMIN_IPS; do https_srcs+=("$ip"); done
 
     case "$FW_TOOL" in
         ufw)
             ufw --force reset 2>/dev/null || true
+            sed -i 's/^IPV6=.*/IPV6=no/' /etc/default/ufw 2>/dev/null || true
             ufw default deny incoming
             ufw default allow outgoing
-            ufw allow ssh
-            for port in "80/tcp" "443/tcp"; do
-                local ans
-                prompt "Allow $port? [y/N]: " ans
-                [[ "$ans" =~ ^[Yy] ]] && ufw allow "$port"
-            done
+            if [[ -n "$ADMIN_IPS" ]]; then
+                for ip in $ADMIN_IPS; do ufw allow from "$ip" to any port "$sshd_port" proto tcp; done
+            else
+                ufw allow "$sshd_port/tcp"
+            fi
+            for cidr in "${https_srcs[@]}"; do ufw allow from "$cidr" to any port 443 proto tcp; done
             ufw --force enable
             ufw status verbose ;;
         firewalld)
             systemctl enable --now firewalld 2>/dev/null || true
             firewall-cmd --set-default-zone=drop 2>/dev/null || true
-            firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
-            for port in "80/tcp" "443/tcp"; do
-                local ans
-                prompt "Allow $port? [y/N]: " ans
-                [[ "$ans" =~ ^[Yy] ]] && firewall-cmd --permanent --add-port="$port" 2>/dev/null || true
+            # Drop broad service/port allowances; we add source-scoped rich rules.
+            firewall-cmd --permanent --remove-service=ssh  2>/dev/null || true
+            firewall-cmd --permanent --remove-service=http 2>/dev/null || true
+            firewall-cmd --permanent --remove-port=80/tcp  2>/dev/null || true
+            firewall-cmd --permanent --remove-port=443/tcp 2>/dev/null || true
+            if [[ -n "$ADMIN_IPS" ]]; then
+                for ip in $ADMIN_IPS; do
+                    firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"$ip\" port port=\"$sshd_port\" protocol=\"tcp\" accept" 2>/dev/null || true
+                done
+            else
+                firewall-cmd --permanent --add-port="$sshd_port/tcp" 2>/dev/null || true
+            fi
+            for cidr in "${https_srcs[@]}"; do
+                firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"$cidr\" port port=\"443\" protocol=\"tcp\" accept" 2>/dev/null || true
             done
             firewall-cmd --reload 2>/dev/null || true
             firewall-cmd --list-all ;;
+        iptables)
+            iptables -F; iptables -X 2>/dev/null || true
+            iptables -P INPUT DROP
+            iptables -P FORWARD DROP
+            iptables -P OUTPUT ACCEPT
+            iptables -A INPUT -i lo -j ACCEPT
+            iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+            if [[ -n "$ADMIN_IPS" ]]; then
+                for ip in $ADMIN_IPS; do iptables -A INPUT -p tcp -s "$ip" --dport "$sshd_port" -j ACCEPT; done
+            else
+                iptables -A INPUT -p tcp --dport "$sshd_port" -j ACCEPT
+            fi
+            for cidr in "${https_srcs[@]}"; do iptables -A INPUT -p tcp -s "$cidr" --dport 443 -j ACCEPT; done
+            # IPv6: drop everything (IPv6 is also disabled via sysctl in disable_ipv6).
+            if command -v ip6tables &>/dev/null; then
+                ip6tables -F 2>/dev/null || true; ip6tables -X 2>/dev/null || true
+                ip6tables -P INPUT DROP 2>/dev/null || true
+                ip6tables -P FORWARD DROP 2>/dev/null || true
+                ip6tables -P OUTPUT DROP 2>/dev/null || true
+                ip6tables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+            fi
+            _persist_iptables
+            iptables -L INPUT -n -v ;;
     esac
-    log "Firewall ($FW_TOOL) configured."
+    log "Firewall ($FW_TOOL): SSH ${ADMIN_IPS:+from admin IPs }on $sshd_port/tcp · 443 from Cloudflare$([[ -n "$ADMIN_IPS" ]] && echo "+admin")$([[ $have_cf -eq 1 ]] || echo " (CF skipped)") · 80 closed · IPv6 off."
 }
 
 setup_fail2ban() {
@@ -1999,8 +2164,12 @@ ABUSE
         log "AbuseIPDB action installed (inline template, no external fetch)."
     fi
 
-    local banaction="ufw"
-    [[ "$FW_TOOL" == "firewalld" ]] && banaction="firewallcmd-rich-rules"
+    local banaction="iptables-multiport"
+    case "$FW_TOOL" in
+        ufw)       banaction="ufw" ;;
+        firewalld) banaction="firewallcmd-rich-rules" ;;
+        iptables)  banaction="iptables-multiport" ;;
+    esac
 
     cat > /etc/fail2ban/jail.local <<JAIL
 [DEFAULT]
@@ -2029,13 +2198,20 @@ logpath = %(sshd_log)s
 maxretry = 2
 findtime = 60
 bantime = 3600
+JAIL
+
+    # ufw/firewalld write a firewall log fail2ban can watch; iptables doesn't,
+    # so only add that jail for the log-backed backends.
+    if [[ "$FW_TOOL" == "ufw" || "$FW_TOOL" == "firewalld" ]]; then
+        cat >> /etc/fail2ban/jail.local <<JAIL_FW
 
 [$FW_TOOL]
 enabled = true
 logpath = /var/log/${FW_TOOL}.log
 maxretry = 5
 bantime = 3600
-JAIL
+JAIL_FW
+    fi
 
     if [[ -n "${abuse_key:-}" ]]; then
         cat >> /etc/fail2ban/jail.local <<'JAIL_ABUSE'
@@ -2132,6 +2308,8 @@ _fw_active() {
     case "$FW_TOOL" in
         ufw)       ufw status 2>/dev/null | head -1 | grep -qi "active" ;;
         firewalld) systemctl is-active --quiet firewalld ;;
+        iptables)  [[ "$(iptables -L INPUT -n 2>/dev/null | awk 'NR==1{print $4}')" == "DROP)" ]] \
+                       || iptables -S INPUT 2>/dev/null | grep -q -- '-P INPUT DROP' ;;
         *) return 1 ;;
     esac
 }
@@ -2239,6 +2417,7 @@ write_detailed_summary() {
     case "$FW_TOOL" in
         ufw)       fw_state=$(ufw status 2>/dev/null | head -1 | awk -F: '{print $2}' | xargs || echo unknown) ;;
         firewalld) systemctl is-active --quiet firewalld && fw_state=active || fw_state=inactive ;;
+        iptables)  iptables -S INPUT 2>/dev/null | grep -q -- '-P INPUT DROP' && fw_state="active (default DROP)" || fw_state=inactive ;;
         *)         fw_state=unknown ;;
     esac
     systemctl is-active --quiet fail2ban 2>/dev/null && fail2ban_state=running || fail2ban_state="not running"
@@ -2317,6 +2496,9 @@ IPv4 address      : $(ip -4 addr show "$(ip route 2>/dev/null | awk '/default/{p
 Default gateway   : $(ip route 2>/dev/null | awk '/default/{print $3; exit}')
 DNS servers       : $(grep '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
 IP config method  : $(if _static_ip_configured; then echo "static — $STATIC_IP_METHOD"; else echo "DHCP"; fi)
+IPv6              : $([[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]] && echo "disabled" || echo "enabled")
+SSH access        : $([[ -n "${ADMIN_IPS:-}" ]] && echo "admin IPs only: $ADMIN_IPS" || echo "all sources")
+HTTPS (443)       : $([[ -s "${CF_V4_FILE:-/nonexistent}" ]] && echo "Cloudflare ranges${ADMIN_IPS:+ + admin IPs}" || echo "not restricted to Cloudflare")
 
 ──────────────────────────────────────────────────────────────────────────────
 CLOUD INTEGRATIONS
@@ -2352,7 +2534,7 @@ NEXT STEPS
 ──────────────────────────────────────────────────────────────────────────────
 1. Reboot to apply kernel updates and group memberships (sudo reboot).
 2. Open a new shell so updated PATH (/etc/profile.d/*.sh) is loaded.
-3. Verify the firewall accepts SSH before logging out:  sudo ${FW_TOOL} status
+3. Verify the firewall accepts SSH before logging out:  $(case "$FW_TOOL" in ufw) echo "sudo ufw status";; firewalld) echo "sudo firewall-cmd --list-all";; iptables) echo "sudo iptables -L INPUT -n -v";; *) echo "sudo $FW_TOOL status";; esac)
 4. Confirm Fail2Ban is active:  sudo fail2ban-client status
 $([[ -x /usr/local/bin/telegram-notify ]] && echo "5. Test Telegram:  telegram-notify info \"hello\"")
 $([[ -x /usr/local/bin/wasabi-backup ]]   && echo "6. Test Wasabi:    wasabi-backup /etc test")
@@ -2397,6 +2579,7 @@ declare -A STEP_LABELS=(
     [setup_wasabi]="Wasabi S3"
     [setup_wasabi_autobackup]="Wasabi auto-backup"
     [setup_cloudflare]="Cloudflare DDNS"
+    [disable_ipv6]="Disable IPv6"
     [setup_firewall]="Firewall"
     [setup_fail2ban]="Fail2Ban"
     [post_notify]="Notify"
@@ -2470,7 +2653,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     run_steps do_update do_install do_install_mc do_install_tmux \
               do_install_extras do_install_nettest do_install_latest \
               do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
-              setup_firewall setup_fail2ban
+              disable_ipv6 setup_firewall setup_fail2ban
     show_summary
     auto_reboot
     exit 0
@@ -2491,6 +2674,6 @@ run_steps do_update do_install do_install_mc do_install_tmux \
           do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
           wizard_static_ip wizard_root wizard_odin_user \
           setup_telegram setup_wasabi setup_wasabi_autobackup setup_cloudflare \
-          setup_firewall setup_fail2ban post_notify
+          disable_ipv6 setup_firewall setup_fail2ban post_notify
 show_summary
 auto_reboot
