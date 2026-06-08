@@ -18,7 +18,7 @@ Universal Linux server setup & hardening wizard. One script, every major distro 
 
 Supports **AlmaLinux, Rocky, CentOS, RHEL, Debian, Ubuntu, Linux Mint, Arch, Manjaro, openSUSE, SLES**.
 
-Prompts during the interactive wizard show a **live `[Ns]` countdown** next to each question. Safe `[Y/n]` confirmations auto-accept after 5 s; opt-in `[y/N]` prompts (cloud integrations, static IP, etc.) auto-decline after 30 s; text prompts fall back to the bracketed default after 5 s. Walk away and the install completes itself with sensible defaults. Override per-run with `AUTO_YES_TIMEOUT`, `AUTO_NO_TIMEOUT`, `AUTO_TEXT_TIMEOUT` env vars (`0` = wait forever).
+Prompts during the interactive wizard show a **live `[Ns]` countdown** next to each question. Safe `[Y/n]` confirmations auto-accept after 60 s; opt-in `[y/N]` prompts (cloud integrations, static IP, etc.) auto-decline after 60 s; text prompts fall back to the bracketed default after 60 s. Walk away and the install completes itself with sensible defaults. Override per-run with `AUTO_YES_TIMEOUT`, `AUTO_NO_TIMEOUT`, `AUTO_TEXT_TIMEOUT` env vars (`0` = wait forever).
 
 A **global progress bar** prints after each step in every mode — `Progress [██████████░░░░░] 47% (7/15) Network test tools` — so you always know how far through the run you are. The total adapts to the mode (quick / unattended / full).
 

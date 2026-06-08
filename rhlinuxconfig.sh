@@ -68,15 +68,14 @@ info()  { echo -e "${CYAN}[i]${NC}  $*"; _to_log "INFO" "$*"; }
 header(){ echo -e "\n${MAG}══ $* ══${NC}"; printf '\n══ %s ══\n' "$*" >> "$LOGFILE"; }
 # Prompt timeouts (set any to 0 to wait forever):
 #   AUTO_YES_TIMEOUT   — safe [Y/n] prompts (default already yes, e.g. "change
-#                        root password?"). Short: hands-off completion.
+#                        root password?"). Auto-accepts on timeout.
 #   AUTO_NO_TIMEOUT    — opt-in [y/N] prompts (cloud setup, static IP, etc.).
-#                        Long: give the operator time to read the multi-line
-#                        intro and type 'y' if they actually want it.
+#                        Auto-declines on timeout.
 #   AUTO_TEXT_TIMEOUT  — text input prompts (IP address, gateway, etc.).
-#                        Short: fall through to the bracketed default.
-AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-5}"
-AUTO_NO_TIMEOUT="${AUTO_NO_TIMEOUT:-30}"
-AUTO_TEXT_TIMEOUT="${AUTO_TEXT_TIMEOUT:-5}"
+#                        Falls through to the bracketed default on timeout.
+AUTO_YES_TIMEOUT="${AUTO_YES_TIMEOUT:-60}"
+AUTO_NO_TIMEOUT="${AUTO_NO_TIMEOUT:-60}"
+AUTO_TEXT_TIMEOUT="${AUTO_TEXT_TIMEOUT:-60}"
 
 prompt(){
     local msg="$1"; shift
