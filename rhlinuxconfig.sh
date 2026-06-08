@@ -1675,12 +1675,14 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 SRC="$1"
-PREFIX="${2:-backup}"
+PREFIX="${2:-data}"
 [[ -z "$SRC" ]] && { echo "Usage: wasabi-backup <source> [prefix]"; exit 1; }
 [[ ! -d "$SRC" && ! -f "$SRC" ]] && { echo "Error: $SRC not found"; exit 1; }
 BASENAME="$(basename "$SRC")"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-DEST="s3://${WASABI_BUCKET}/${PREFIX}/${BASENAME}-${TIMESTAMP}"
+HOST="$(hostname -f 2>/dev/null || hostname)"
+# All backups live under  <bucket>/backup/<hostname>/
+DEST="s3://${WASABI_BUCKET}/backup/${HOST}/${PREFIX}/${BASENAME}-${TIMESTAMP}"
 echo "Backing up $SRC → $DEST"
 aws s3 --endpoint-url "https://s3.${WASABI_REGION}.wasabisys.com" \
     cp --recursive "$SRC" "$DEST"
@@ -1713,6 +1715,7 @@ setup_wasabi_autobackup() {
     [[ -f /etc/profile.d/wasabi.sh ]] && source /etc/profile.d/wasabi.sh
     local bucket="${WASABI_BUCKET:-backup}"
     local region="${WASABI_REGION:-us-east-1}"
+    local host; host="$(hostname -f 2>/dev/null || hostname)"
 
     local backup_script="/usr/local/bin/wasabi-autobackup"
     cat > "$backup_script" <<'AUTOBACKUP'
@@ -1722,6 +1725,9 @@ BUCKET="${WASABI_BUCKET:?WASABI_BUCKET not set}"
 REGION="${WASABI_REGION:?WASABI_REGION not set}"
 ENDPOINT="https://s3.${REGION}.wasabisys.com"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+HOST="$(hostname -f 2>/dev/null || hostname)"
+# Everything for this host lives under  <bucket>/backup/<hostname>/
+BASE="backup/${HOST}"
 LOG="/var/log/wasabi-backup.log"
 
 echo "===== Wasabi Auto-Backup $TIMESTAMP =====" | tee -a "$LOG"
@@ -1735,7 +1741,7 @@ aws_base() { aws s3 --endpoint-url "$ENDPOINT" "$@"; }
 backup_dir() {
     local src="$1" prefix="$2"
     local name; name=$(basename "$src")
-    local dest="s3://${BUCKET}/system/${prefix}/${name}"
+    local dest="s3://${BUCKET}/${BASE}/${prefix}/${name}"
     echo "[$(date '+%H:%M:%S')] Syncing $src → $dest" | tee -a "$LOG"
     aws_base sync "$src" "$dest" --delete 2>&1 | tee -a "$LOG" | tail -3
 }
@@ -1760,12 +1766,12 @@ CRON
     log "Daily cron job installed at /etc/cron.daily/wasabi-autobackup"
 
     echo
-    echo "  What gets backed up:"
-    echo "    /home       → s3://${bucket}/system/home/"
-    echo "    /etc        → s3://${bucket}/system/config/"
-    echo "    /root       → s3://${bucket}/system/root/"
-    echo "    /var/log    → s3://${bucket}/system/logs/"
-    echo "    /var/www    → s3://${bucket}/system/www/ (if exists)"
+    echo "  What gets backed up (all under s3://${bucket}/backup/${host}/):"
+    echo "    /home       → s3://${bucket}/backup/${host}/home/"
+    echo "    /etc        → s3://${bucket}/backup/${host}/config/"
+    echo "    /root       → s3://${bucket}/backup/${host}/root/"
+    echo "    /var/log    → s3://${bucket}/backup/${host}/logs/"
+    echo "    /var/www    → s3://${bucket}/backup/${host}/www/ (if exists)"
     echo "  Runs daily via /etc/cron.daily"
     echo
 

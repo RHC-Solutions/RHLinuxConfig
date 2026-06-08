@@ -109,7 +109,7 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | 17 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
 | 18 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
 | 19 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
-| 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
+| 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi, namespaced per host under `<bucket>/backup/<hostname>/` (home/config/root/logs/www). |
 | 21 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
 | 22 | **Disable IPv6** | Writes `/etc/sysctl.d/99-rhlc-disable-ipv6.conf` (all/default/lo `disable_ipv6 = 1`), applies immediately via `sysctl --system`, and sets `ip6tables` to DROP. IPv4-only, no reboot, reversible by deleting the drop-in. |
 | 23 | **Firewall** | **ufw / firewalld / iptables** (auto-detected per distro; falls back to iptables and installs it if neither is present; override with `FW_TOOL=…`). Default-deny inbound. **Prompts for admin IP(s)** — enter **several at once**, separated by spaces or commas (pre-filled with your current SSH client) — and allows **SSH only from those** sources. **443/tcp** is opened **only from [Cloudflare's published IPv4 ranges](https://www.cloudflare.com/ips-v4)** plus the admin IPs. **Port 80 is never opened.** iptables rules are persisted per-distro. |
@@ -128,9 +128,9 @@ telegram-notify info  "Server online"
 telegram-notify alert "Disk > 90%"
 echo "$something" | telegram-notify warn       # stdin works too
 
-# Wasabi S3 backups
-wasabi-backup /var/www                          # one-shot
-wasabi-backup /etc configs                      # with prefix
+# Wasabi S3 backups — everything lands under  <bucket>/backup/<hostname>/
+wasabi-backup /var/www                          # → <bucket>/backup/<host>/data/www-<ts>
+wasabi-backup /etc configs                      # → <bucket>/backup/<host>/configs/etc-<ts>
 /usr/local/bin/wasabi-autobackup                # run the daily job manually
 
 # Cloudflare DDNS
