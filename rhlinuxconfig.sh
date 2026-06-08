@@ -1528,47 +1528,75 @@ wizard_odin_user() {
     echo
 }
 
-# Install a PAM hook that sends a Telegram alert on every SSH login.
-# Args: <token> <chat>. Fires via pam_exec from /etc/pam.d/sshd (so it covers
-# password, key, and scp/sftp sessions). Requires `UsePAM yes` in sshd (default).
+# Install a PAM hook that sends a Telegram alert on every login.
+# Args: <token> <chat>. Fires via pam_exec from /etc/pam.d/{sshd,login}, so it
+# covers SSH (password / key / scp / sftp) AND local console logins. Requires
+# `UsePAM yes` in sshd (default). The script is also runnable by hand to test.
+ALERT_SCRIPT="/usr/local/bin/telegram-login-alert.sh"
 _install_ssh_login_alert() {
-    local token="$1" chat="$2"
-    local alert="/usr/local/bin/ssh-login-alert"
+    local token="$1" chat="$2" alert="$ALERT_SCRIPT" pamf
     cat > "$alert" <<'ALERT'
 #!/usr/bin/env bash
-# SSH login → Telegram alert. Invoked by pam_exec (see /etc/pam.d/sshd).
-# pam_exec also runs on session close, so only alert when a session opens.
-[ "$PAM_TYPE" = "open_session" ] || exit 0
+# Login → Telegram alert. Invoked by pam_exec (see /etc/pam.d/sshd and login),
+# and also runnable by hand for testing:  sudo /usr/local/bin/telegram-login-alert.sh
+#
+# pam_exec runs this on BOTH session open and close — only alert on open. When
+# run manually (no PAM_TYPE in the environment) we still send, so it's testable.
+[ -n "$PAM_TYPE" ] && [ "$PAM_TYPE" != "open_session" ] && exit 0
+
 TOKEN="__TG_TOKEN__"
 CHAT="__TG_CHAT__"
+
+# User: pam_exec sets PAM_USER; fall back to whoami for manual runs.
+USER_NAME="${PAM_USER:-$(whoami)}"
+# Source IP: pam_exec sets PAM_RHOST; $SSH_CONNECTION only exists in a live SSH
+# shell (manual test), not under pam_exec. Fall back to local/tty for console.
+IP_ADDRESS="${PAM_RHOST:-}"
+[ -z "$IP_ADDRESS" ] && IP_ADDRESS=$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')
+[ -z "$IP_ADDRESS" ] && IP_ADDRESS="local/tty"
 SERVER="$(hostname -s 2>/dev/null || hostname)"
 WHEN="$(date '+%Y-%m-%d %H:%M:%S')"
-TEXT="🚨 Login detected
+
+MESSAGE="🚨 Login detected
 Server: ${SERVER}
-User: ${PAM_USER:-unknown}
-From: ${PAM_RHOST:-local}
+User: ${USER_NAME}
+From: ${IP_ADDRESS}
 Time: ${WHEN}"
+
 # Fire-and-forget so a slow/unreachable Telegram never delays the login.
 curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
     -d chat_id="${CHAT}" \
-    --data-urlencode "text=${TEXT}" </dev/null >/dev/null 2>&1 &
+    --data-urlencode "text=${MESSAGE}" </dev/null >/dev/null 2>&1 &
 exit 0
 ALERT
     sed -i "s|__TG_TOKEN__|$token|; s|__TG_CHAT__|$chat|" "$alert"
+    # Token is embedded in the file → root-only (do NOT use pam_exec seteuid).
+    chown root:root "$alert" 2>/dev/null || true
     chmod 700 "$alert"
 
-    # Wire it into the sshd PAM stack (idempotent).
-    local pamf="/etc/pam.d/sshd"
-    if [[ -f "$pamf" ]]; then
-        if ! grep -q "ssh-login-alert" "$pamf"; then
-            printf '\n# RHLinuxConfig: Telegram alert on SSH login\nsession optional pam_exec.so quiet %s\n' "$alert" >> "$pamf"
+    # Migrate away from the earlier ssh-only name/hook if a prior run created it.
+    if [[ -e /usr/local/bin/ssh-login-alert ]]; then
+        sed -i '\#ssh-login-alert#d' /etc/pam.d/sshd 2>/dev/null || true
+        rm -f /usr/local/bin/ssh-login-alert
+    fi
+
+    # Wire into the SSH and local-console PAM stacks (idempotent, runs as root).
+    local hooked=0
+    for pamf in /etc/pam.d/sshd /etc/pam.d/login; do
+        [[ -f "$pamf" ]] || continue
+        if ! grep -q "telegram-login-alert.sh" "$pamf"; then
+            printf '\n# RHLinuxConfig: Telegram alert on login\nsession optional pam_exec.so quiet %s\n' "$alert" >> "$pamf"
         fi
-        log "SSH login alerts enabled (pam_exec → $alert)."
+        hooked=1
+    done
+    if [[ "$hooked" -eq 1 ]]; then
+        log "Login alerts enabled (pam_exec → $alert) for SSH + console."
+        echo "  Test it now:  sudo $alert"
         if ! grep -qiE '^[[:space:]]*UsePAM[[:space:]]+yes' /etc/ssh/sshd_config 2>/dev/null; then
-            warn "sshd may have 'UsePAM no' — login alerts need 'UsePAM yes' to fire."
+            warn "sshd may have 'UsePAM no' — SSH login alerts need 'UsePAM yes' to fire."
         fi
     else
-        warn "$pamf not found — could not enable SSH login alerts."
+        warn "No /etc/pam.d/{sshd,login} found — could not enable login alerts."
     fi
 }
 
@@ -1642,12 +1670,12 @@ SCRIPT
     log "telegram-notify installed at $script"
     echo "  Usage: telegram-notify info \"Server is running\""
 
-    # Optional: alert on every SSH login (🚨 Login detected …).
-    prompt "Send a Telegram alert on every SSH login? [Y/n]: " ans
+    # Optional: alert on every login — SSH + local console (🚨 Login detected …).
+    prompt "Send a Telegram alert on every login (SSH + console)? [Y/n]: " ans
     if [[ "${ans:-y}" =~ ^[Yy] ]]; then
         _install_ssh_login_alert "$tg_token" "$tg_chat"
     else
-        log "SSH login alerts skipped."
+        log "Login alerts skipped."
     fi
 }
 
@@ -2690,7 +2718,7 @@ HTTPS (443)       : $([[ -s "${CF_V4_FILE:-/nonexistent}" ]] && echo "Cloudflare
 CLOUD INTEGRATIONS
 ──────────────────────────────────────────────────────────────────────────────
 Telegram notifier : $([[ -x /usr/local/bin/telegram-notify ]] && echo "installed at /usr/local/bin/telegram-notify" || echo "not configured")
-SSH login alerts  : $({ [[ -x /usr/local/bin/ssh-login-alert ]] && grep -q ssh-login-alert /etc/pam.d/sshd 2>/dev/null; } && echo "enabled (pam_exec → Telegram)" || echo "not configured")
+Login alerts      : $({ [[ -x /usr/local/bin/telegram-login-alert.sh ]] && grep -q telegram-login-alert.sh /etc/pam.d/sshd 2>/dev/null; } && echo "enabled (SSH + console → Telegram)" || echo "not configured")
 Wasabi S3 creds   : $([[ -f /root/.aws/credentials ]] && echo "/root/.aws/credentials" || echo "not configured")
 Wasabi bucket     : $({ [[ -f /etc/profile.d/wasabi.sh ]] && grep WASABI_BUCKET /etc/profile.d/wasabi.sh | cut -d= -f2; } || echo "n/a")
 Wasabi auto-backup: $([[ -f /etc/cron.daily/wasabi-autobackup ]] && echo "daily (/etc/cron.daily/wasabi-autobackup)" || echo "not configured")
