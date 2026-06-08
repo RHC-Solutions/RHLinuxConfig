@@ -229,7 +229,10 @@ detect_distro() {
             PKG_INSTALL_NQ="pacman -S --noconfirm"
             PKG_UPDATE="pacman -Sy"
             PKG_UPGRADE="pacman -Syu --noconfirm"
-            PKG_AUTOREMOVE="pacman -Rns --noconfirm $(pacman -Qdtq 2>/dev/null) 2>/dev/null || true"
+            # NOTE: \$(...) is escaped on purpose — PKG_AUTOREMOVE is run via
+            # `eval`, so the orphan lookup must defer to eval time, not expand
+            # here at assignment time (when pacman may be absent / nothing to do).
+            PKG_AUTOREMOVE="pacman -Rns --noconfirm \$(pacman -Qdtq 2>/dev/null) 2>/dev/null || true"
             PKG_CHECK="pacman -Q"
             PKG_SEARCH="pacman -Ss"
             PKG_REPO_ADD=""
