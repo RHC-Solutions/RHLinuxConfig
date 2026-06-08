@@ -9,8 +9,10 @@
 # - Refreshes npm + all globally installed npm packages each run
 # - Telegram alerts, Wasabi backup, Cloudflare DDNS
 # - Firewall (UFW / firewalld / iptables) + Fail2Ban + AbuseIPDB:
-#     SSH restricted to admin IPs, 443 from Cloudflare ranges (+admin),
-#     port 80 closed, IPv6 disabled (IPv4-only server)
+#     SSH restricted to admin IPs (enter several at once), 443 from
+#     Cloudflare ranges (+admin), port 80 closed, IPv6 disabled
+# - Geo-Fail2Ban (GeoIP Telegram alerts, AbuseIPDB ipset, country geoblock)
+#     auto-installed when a Telegram token is set; stock Fail2Ban skipped then
 # - Static IP, root password/disable, odin user creation
 # Behaviors worth knowing:
 # - Prompts show a live "[Ns]" countdown; safe [Y/n] → 5s default-yes,
@@ -1576,6 +1578,9 @@ SCRIPT
     sed -i "s|__TG_TOKEN__|$tg_token|; s|__TG_CHAT__|$tg_chat|" "$script"
     chmod +x "$script"
 
+    # Expose for downstream steps (e.g. Geo-Fail2Ban reuses these credentials).
+    TG_TOKEN="$tg_token"; TG_CHAT="$tg_chat"
+
     telegram-notify info "Telegram notifications configured on $(hostname)" || \
         warn "Test message failed — check CHAT_ID."
 
@@ -2024,14 +2029,21 @@ _sshd_port() {
 # SSH client so a remote operator can't lock themselves out by accident.
 ADMIN_IPS=""
 _collect_admin_ips() {
-    local detected ans
+    local detected ans raw n
     detected=$(awk '{print $1}' <<<"${SSH_CONNECTION:-}")
     [[ -z "$detected" ]] && detected=$(awk '{print $1}' <<<"${SSH_CLIENT:-}")
     echo "SSH ($(_sshd_port)/tcp) will be restricted to the admin IP(s) you list."
-    echo "Space-separated IPv4 addresses or CIDRs, e.g.:  203.0.113.4 198.51.100.0/24"
-    [[ -n "$detected" ]] && echo "Detected your current SSH client: $detected"
+    echo "Enter one or MORE IPv4 addresses / CIDRs at once, separated by spaces or commas:"
+    echo "    e.g.  203.0.113.4 198.51.100.0/24 203.0.113.7"
+    [[ -n "$detected" ]] && echo "Detected your current SSH client: $detected (kept if you just press Enter)"
     prompt "Admin IP(s) for SSH [${detected:-none}]: " ans
-    ADMIN_IPS="${ans:-$detected}"
+    raw="${ans:-$detected}"
+    # Accept comma/semicolon separators too; collapse to a clean space-separated list.
+    ADMIN_IPS="$(tr ',;' '  ' <<<"$raw" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')"
+    if [[ -n "$ADMIN_IPS" ]]; then
+        n=$(wc -w <<<"$ADMIN_IPS")
+        log "SSH allowed from $n admin source(s): $ADMIN_IPS"
+    fi
 }
 
 # Fetch Cloudflare's published IPv4 ranges (cached for reuse / offline runs).
@@ -2127,8 +2139,85 @@ setup_firewall() {
     log "Firewall ($FW_TOOL): SSH ${ADMIN_IPS:+from admin IPs }on $sshd_port/tcp · 443 from Cloudflare$([[ -n "$ADMIN_IPS" ]] && echo "+admin")$([[ $have_cf -eq 1 ]] || echo " (CF skipped)") · 80 closed · IPv6 off."
 }
 
+# ── 14.5 Geo-Fail2Ban (https://github.com/RHC-Solutions/Geo-Fail2Ban) ───────
+# Advanced Fail2Ban: GeoIP Telegram alerts, AbuseIPDB reputation + permanent
+# ipset blacklist, optional country geoblock, reboot-safe systemd restore units.
+# Runs automatically whenever a Telegram bot token is available (its installer
+# hard-requires one). It ships a SUPERSET of our fail2ban config, so on success
+# we set GEO_F2B_INSTALLED=1 and the plain setup_fail2ban step skips itself —
+# that is how we "include Geo-Fail2Ban but skip the duplicate jail config".
+GEO_F2B_REPO="https://github.com/RHC-Solutions/Geo-Fail2Ban.git"
+GEO_F2B_INSTALLED=0
+TG_TOKEN="${TG_TOKEN:-}"; TG_CHAT="${TG_CHAT:-}"
+setup_geo_fail2ban() {
+    header "Geo-Fail2Ban (advanced Fail2Ban)"
+
+    # Reuse Telegram creds from setup_telegram (globals, or the installed notifier).
+    local token="${TG_TOKEN:-}" chat="${TG_CHAT:-}"
+    if [[ ( -z "$token" || -z "$chat" ) && -x /usr/local/bin/telegram-notify ]]; then
+        token=$(awk -F'"' '/^TOKEN=/{print $2; exit}' /usr/local/bin/telegram-notify 2>/dev/null)
+        chat=$(awk -F'"'  '/^CHAT=/{print $2; exit}'  /usr/local/bin/telegram-notify 2>/dev/null)
+    fi
+    if [[ -z "$token" || -z "$chat" ]]; then
+        info "No Telegram bot token configured — skipping Geo-Fail2Ban (stock Fail2Ban will run instead)."
+        return 0
+    fi
+    if ! command -v git &>/dev/null; then
+        warn "git not available — skipping Geo-Fail2Ban (stock Fail2Ban will run instead)."
+        return 0
+    fi
+
+    # Optional extra API keys + geoblock list (blank = that feature stays limited/off).
+    local ipinfo_token abuse_key geo_countries
+    prompt "ipinfo.io API token for GeoIP enrichment (blank to skip): " ipinfo_token
+    prompt "AbuseIPDB API key for reputation + daily blacklist (blank to skip): " abuse_key
+    echo "Country geoblock drops whole countries via ipdeny.com zone files (weekly refresh)."
+    prompt "Countries to geoblock, space-separated codes e.g. 'cn ru vn' (blank = none): " geo_countries
+    geo_countries="$(tr ',;' '  ' <<<"$geo_countries" | tr -s '[:space:]' ' ' | sed 's/^ *//; s/ *$//')"
+
+    local src="/opt/geo-fail2ban-src"
+    rm -rf "$src"
+    info "Cloning Geo-Fail2Ban..."
+    if ! git clone --depth 1 "$GEO_F2B_REPO" "$src" 2>&1 | tail -2; then
+        warn "Geo-Fail2Ban clone failed — falling back to stock Fail2Ban."
+        return 0
+    fi
+
+    # Pre-seed config/.env so the installer runs unattended: its prompts keep
+    # these values when they read EOF (we feed /dev/null) and time out.
+    install -d -m 0755 "$src/config"
+    cat > "$src/config/.env" <<ENV
+TELEGRAM_BOT_TOKEN="$token"
+TELEGRAM_CHAT_ID="$chat"
+IPINFO_API_TOKEN="$ipinfo_token"
+ABUSEIPDB_API_KEY="$abuse_key"
+ABUSE_THRESHOLD=75
+REPORT_CATEGORIES="18,22,23"
+BLACKLIST_LIMIT=10000
+GEOBLOCK_COUNTRIES="$geo_countries"
+ENV
+
+    local geo_flag="--skip-geo"
+    [[ -n "$geo_countries" ]] && geo_flag=""
+
+    info "Running Geo-Fail2Ban installer ($([[ -n "$geo_countries" ]] && echo "geoblock: $geo_countries" || echo "no geoblock"))..."
+    # PROMPT_TIMEOUT=1 + stdin from /dev/null → every installer prompt auto-skips
+    # fast, keeping the pre-seeded .env values. WL_IPS is left empty so Geo does
+    # NOT re-touch the firewall — setup_firewall already restricts SSH.
+    if ( cd "$src" && PROMPT_TIMEOUT=1 bash install.sh $geo_flag </dev/null ); then
+        GEO_F2B_INSTALLED=1
+        log "Geo-Fail2Ban installed — Fail2Ban is now managed by Geo-Fail2Ban."
+    else
+        warn "Geo-Fail2Ban installer reported an error — stock Fail2Ban will run instead."
+    fi
+}
+
 setup_fail2ban() {
     header "Fail2Ban + AbuseIPDB Setup"
+    if [[ "${GEO_F2B_INSTALLED:-0}" -eq 1 ]]; then
+        log "Fail2Ban is managed by Geo-Fail2Ban — skipping duplicate jail config."
+        return 0
+    fi
     if ! command -v fail2ban-server &>/dev/null; then
         pkg_install fail2ban
     fi
@@ -2369,6 +2458,7 @@ show_summary() {
     echo -e "${MAG}── Security ──${NC}"
     _fw_active                                    && sum_pass "Firewall ($FW_TOOL)"  "active" || sum_fail "Firewall ($FW_TOOL)"  "inactive"
     systemctl is-active --quiet fail2ban 2>/dev/null && sum_pass "Fail2Ban"          "running" || sum_fail "Fail2Ban"             "not running"
+    [[ -d /opt/geo-fail2ban ]] && sum_pass "Geo-Fail2Ban" "installed ($(fail2ban-client status abuseipdb &>/dev/null && echo 'abuseipdb jail active' || echo 'see logs'))" || sum_skip "Geo-Fail2Ban"
     _ntp_active                                   && sum_pass "NTP / chrony"         "synced"  || sum_fail "NTP / chrony"         "inactive"
     grep -q '^PermitRootLogin no' /etc/ssh/sshd_config 2>/dev/null \
         && sum_pass "Root SSH"  "disabled" || sum_skip "Root SSH" "still enabled"
@@ -2477,6 +2567,9 @@ SECURITY
 ──────────────────────────────────────────────────────────────────────────────
 Firewall          : $FW_TOOL ($fw_state)
 Fail2Ban          : $fail2ban_state
+Geo-Fail2Ban      : $([[ -d /opt/geo-fail2ban ]] && echo "installed (/opt/geo-fail2ban, conf: /etc/geo-fail2ban.conf)" || echo "not installed")
+AbuseIPDB ipset   : $(command -v ipset &>/dev/null && ipset list -t abuseipdb-blacklist &>/dev/null && echo "active ($(ipset list -t abuseipdb-blacklist 2>/dev/null | awk '/Number of entries/{print $4}') IPs)" || echo "n/a")
+Country geoblock  : $(command -v ipset &>/dev/null && ipset list -t geoblock &>/dev/null && echo "active" || echo "off")
 NTP / time sync   : $ntp_state
 Root SSH login    : $(grep -E '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1 || echo unset)
 AbuseIPDB action  : $([[ -f /etc/fail2ban/action.d/abuseipdb.conf ]] && echo "installed" || echo "not configured")
@@ -2581,6 +2674,7 @@ declare -A STEP_LABELS=(
     [setup_cloudflare]="Cloudflare DDNS"
     [disable_ipv6]="Disable IPv6"
     [setup_firewall]="Firewall"
+    [setup_geo_fail2ban]="Geo-Fail2Ban"
     [setup_fail2ban]="Fail2Ban"
     [post_notify]="Notify"
 )
@@ -2653,7 +2747,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     run_steps do_update do_install do_install_mc do_install_tmux \
               do_install_extras do_install_nettest do_install_latest \
               do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
-              disable_ipv6 setup_firewall setup_fail2ban
+              disable_ipv6 setup_firewall setup_geo_fail2ban setup_fail2ban
     show_summary
     auto_reboot
     exit 0
@@ -2674,6 +2768,6 @@ run_steps do_update do_install do_install_mc do_install_tmux \
           do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
           wizard_static_ip wizard_root wizard_odin_user \
           setup_telegram setup_wasabi setup_wasabi_autobackup setup_cloudflare \
-          disable_ipv6 setup_firewall setup_fail2ban post_notify
+          disable_ipv6 setup_firewall setup_geo_fail2ban setup_fail2ban post_notify
 show_summary
 auto_reboot

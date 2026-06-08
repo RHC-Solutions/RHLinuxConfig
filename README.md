@@ -112,8 +112,9 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
 | 21 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
 | 22 | **Disable IPv6** | Writes `/etc/sysctl.d/99-rhlc-disable-ipv6.conf` (all/default/lo `disable_ipv6 = 1`), applies immediately via `sysctl --system`, and sets `ip6tables` to DROP. IPv4-only, no reboot, reversible by deleting the drop-in. |
-| 23 | **Firewall** | **ufw / firewalld / iptables** (auto-detected per distro; falls back to iptables and installs it if neither is present; override with `FW_TOOL=…`). Default-deny inbound. **Prompts for admin IP(s)** (pre-filled with your current SSH client) and allows **SSH only from those** sources. **443/tcp** is opened **only from [Cloudflare's published IPv4 ranges](https://www.cloudflare.com/ips-v4)** plus the admin IPs. **Port 80 is never opened.** iptables rules are persisted per-distro. |
-| 24 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting. Ban action matches the backend (`ufw` / `firewallcmd-rich-rules` / `iptables-multiport`). |
+| 23 | **Firewall** | **ufw / firewalld / iptables** (auto-detected per distro; falls back to iptables and installs it if neither is present; override with `FW_TOOL=…`). Default-deny inbound. **Prompts for admin IP(s)** — enter **several at once**, separated by spaces or commas (pre-filled with your current SSH client) — and allows **SSH only from those** sources. **443/tcp** is opened **only from [Cloudflare's published IPv4 ranges](https://www.cloudflare.com/ips-v4)** plus the admin IPs. **Port 80 is never opened.** iptables rules are persisted per-distro. |
+| 24 | **Geo-Fail2Ban** | Installs [RHC-Solutions/Geo-Fail2Ban](https://github.com/RHC-Solutions/Geo-Fail2Ban) **automatically whenever a Telegram bot token is configured** (step 18). It provides a superset Fail2Ban stack: GeoIP-enriched Telegram ban/unban alerts, AbuseIPDB reputation + permanent **ipset blacklist** (daily import), optional **country geoblock** (prompted; ipdeny.com zones, weekly refresh), and reboot-safe systemd restore units. Reuses the existing Telegram creds; prompts for optional ipinfo.io / AbuseIPDB keys. Installs to `/opt/geo-fail2ban` (config `/etc/geo-fail2ban.conf`). **When it installs, step 25 is skipped** to avoid a duplicate `jail.local`. |
+| 25 | **Fail2Ban** *(skipped if Geo-Fail2Ban installed)* | Fallback stock config when no Telegram token is set: SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting. Ban action matches the backend (`ufw` / `firewallcmd-rich-rules` / `iptables-multiport`). |
 
 ---
 
@@ -174,6 +175,10 @@ glances                                         # top alternative, also exposes 
 /etc/fail2ban/jail.local              # SSH + firewall jails
 /etc/fail2ban/action.d/abuseipdb.conf # (if AbuseIPDB key given)
 
+/opt/geo-fail2ban/                    # Geo-Fail2Ban scripts (when Telegram token set)
+/etc/geo-fail2ban.conf                # Geo-Fail2Ban credentials (chmod 600)
+/etc/fail2ban/jail.d/abuseipdb.conf   # Geo-Fail2Ban permanent-ban jail (bantime = -1)
+
 /etc/sysctl.d/99-rhlc-disable-ipv6.conf  # IPv6 off (delete to restore)
 /etc/rhlc/cloudflare-ips-v4.txt          # cached Cloudflare IPv4 ranges (443 allow-list)
 /etc/iptables/rules.v4 · /etc/sysconfig/iptables  # persisted iptables rules (when FW_TOOL=iptables)
@@ -221,6 +226,8 @@ Distro-specific behavior lives in `case "$OS_FAMILY"` blocks — add a new arm (
 | Origin server unreachable over HTTPS | Port 443 is allowed **only from Cloudflare ranges + admin IPs** — direct access from elsewhere is blocked by design. Add a source rule or proxy through Cloudflare. |
 | Need IPv6 back | Delete `/etc/sysctl.d/99-rhlc-disable-ipv6.conf`, run `sudo sysctl --system`, then reboot. |
 | Telegram test message fails | Token from `@BotFather` correct? Did you `/start` the bot in a DM first to get the chat ID? |
+| Geo-Fail2Ban didn't install | It only runs when a Telegram bot token is set (step 18) and `git` is available; otherwise the stock Fail2Ban step runs instead. Check `/etc/geo-fail2ban.conf` and `journalctl -u fail2ban`. |
+| Geo-Fail2Ban jails / alerts not working | Verify creds in `/etc/geo-fail2ban.conf`; `sudo fail2ban-client status abuseipdb`; test alert: `sudo bash /opt/geo-fail2ban-src/tests/test_alert.sh`. |
 | Wasabi backup says bucket inaccessible | Check region — endpoint is `s3.<region>.wasabisys.com`, default is `us-east-1` |
 | Cloudflare DDNS "Update failed" | Token needs **DNS:Edit** for the specific zone, not just account-level |
 
@@ -237,7 +244,8 @@ Logs:
 - `wizard_static_ip` rewrites network config files; you can lose connectivity if the IP/gateway is wrong. Have console access ready.
 - **The firewall step can lock you out.** SSH is restricted to the admin IP(s) you enter (pre-filled with your current SSH client). If you supply a wrong IP — or none while connected via a NATed/changing address — you may lose access. Keep a provider console open until you've confirmed a fresh SSH session works. If no admin IP is given, SSH is left open to all to avoid a hard lockout.
 - The firewall **disables IPv6** and **closes port 80**, and opens **443 only to Cloudflare ranges + your admin IPs**. If your service must be reachable directly (not via Cloudflare) or over IPv6, adjust `setup_firewall()` / re-enable IPv6 first.
-- `--unattended` skips the interactive wizards but **does** run disable-IPv6, firewall, and fail2ban. The firewall prompt auto-resolves to your detected SSH client (or, if none, leaves SSH open).
+- When a Telegram token is set, the script **clones and runs the external [Geo-Fail2Ban](https://github.com/RHC-Solutions/Geo-Fail2Ban) installer**, which installs packages, adds firewall/ipset DROP rules, creates systemd units + cron jobs, and (if you pick geoblock) downloads country zone files. Review that project before enabling if you need to vet third-party code.
+- `--unattended` skips the interactive wizards but **does** run disable-IPv6, firewall, and fail2ban. It has no Telegram step, so Geo-Fail2Ban is skipped and the stock Fail2Ban config is used. The firewall prompt auto-resolves to your detected SSH client (or, if none, leaves SSH open).
 - Generated passwords are printed once to the terminal and not stored anywhere. Capture them at the time.
 
 ---
