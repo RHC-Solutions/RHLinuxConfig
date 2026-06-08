@@ -107,7 +107,7 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | 15 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro. If a static IP is **already configured** (NetworkManager `manual`, netplan `dhcp4: false`, `inet static`, `BOOTPROTO=static/none`, or a systemd-networkd `Address=`), the wizard skips the prompt and leaves the network untouched — the active address and method are shown in the final status block. |
 | 16 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
 | 17 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
-| 18 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify`. When configured, the full install **summary report is sent to your Telegram** as a document at the end of every run (quick / unattended / full). |
+| 18 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify`. When configured, the full install **summary report is sent to your Telegram** as a document at the end of every run (quick / unattended / full). Optionally installs an **SSH login alert** (`🚨 Login detected` — server/user/IP/time) via a `pam_exec` hook in `/etc/pam.d/sshd`, firing on every SSH session (password, key, scp/sftp). |
 | 19 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
 | 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi, namespaced per host under `<bucket>/backup/<hostname>/` (home/config/root/logs/www). |
 | 21 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
@@ -157,6 +157,7 @@ glances                                         # top alternative, also exposes 
 
 ```
 /usr/local/bin/telegram-notify        # Telegram helper
+/usr/local/bin/ssh-login-alert        # SSH login → Telegram (pam_exec hook, if enabled)
 /usr/local/bin/wasabi-backup          # Manual S3 upload
 /usr/local/bin/wasabi-autobackup      # Daily backup runner
 /usr/local/bin/cloudflare-dns         # DDNS updater

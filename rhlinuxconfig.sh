@@ -1528,6 +1528,50 @@ wizard_odin_user() {
     echo
 }
 
+# Install a PAM hook that sends a Telegram alert on every SSH login.
+# Args: <token> <chat>. Fires via pam_exec from /etc/pam.d/sshd (so it covers
+# password, key, and scp/sftp sessions). Requires `UsePAM yes` in sshd (default).
+_install_ssh_login_alert() {
+    local token="$1" chat="$2"
+    local alert="/usr/local/bin/ssh-login-alert"
+    cat > "$alert" <<'ALERT'
+#!/usr/bin/env bash
+# SSH login → Telegram alert. Invoked by pam_exec (see /etc/pam.d/sshd).
+# pam_exec also runs on session close, so only alert when a session opens.
+[ "$PAM_TYPE" = "open_session" ] || exit 0
+TOKEN="__TG_TOKEN__"
+CHAT="__TG_CHAT__"
+SERVER="$(hostname -s 2>/dev/null || hostname)"
+WHEN="$(date '+%Y-%m-%d %H:%M:%S')"
+TEXT="🚨 Login detected
+Server: ${SERVER}
+User: ${PAM_USER:-unknown}
+From: ${PAM_RHOST:-local}
+Time: ${WHEN}"
+# Fire-and-forget so a slow/unreachable Telegram never delays the login.
+curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+    -d chat_id="${CHAT}" \
+    --data-urlencode "text=${TEXT}" </dev/null >/dev/null 2>&1 &
+exit 0
+ALERT
+    sed -i "s|__TG_TOKEN__|$token|; s|__TG_CHAT__|$chat|" "$alert"
+    chmod 700 "$alert"
+
+    # Wire it into the sshd PAM stack (idempotent).
+    local pamf="/etc/pam.d/sshd"
+    if [[ -f "$pamf" ]]; then
+        if ! grep -q "ssh-login-alert" "$pamf"; then
+            printf '\n# RHLinuxConfig: Telegram alert on SSH login\nsession optional pam_exec.so quiet %s\n' "$alert" >> "$pamf"
+        fi
+        log "SSH login alerts enabled (pam_exec → $alert)."
+        if ! grep -qiE '^[[:space:]]*UsePAM[[:space:]]+yes' /etc/ssh/sshd_config 2>/dev/null; then
+            warn "sshd may have 'UsePAM no' — login alerts need 'UsePAM yes' to fire."
+        fi
+    else
+        warn "$pamf not found — could not enable SSH login alerts."
+    fi
+}
+
 # ── 10. Telegram Integration (Wizard) ─────────────────────────────────────
 setup_telegram() {
     header "Telegram Bot Integration"
@@ -1597,6 +1641,14 @@ SCRIPT
 
     log "telegram-notify installed at $script"
     echo "  Usage: telegram-notify info \"Server is running\""
+
+    # Optional: alert on every SSH login (🚨 Login detected …).
+    prompt "Send a Telegram alert on every SSH login? [Y/n]: " ans
+    if [[ "${ans:-y}" =~ ^[Yy] ]]; then
+        _install_ssh_login_alert "$tg_token" "$tg_chat"
+    else
+        log "SSH login alerts skipped."
+    fi
 }
 
 # ── 11. Wasabi (S3) Integration (Wizard) ───────────────────────────────────
@@ -2638,6 +2690,7 @@ HTTPS (443)       : $([[ -s "${CF_V4_FILE:-/nonexistent}" ]] && echo "Cloudflare
 CLOUD INTEGRATIONS
 ──────────────────────────────────────────────────────────────────────────────
 Telegram notifier : $([[ -x /usr/local/bin/telegram-notify ]] && echo "installed at /usr/local/bin/telegram-notify" || echo "not configured")
+SSH login alerts  : $({ [[ -x /usr/local/bin/ssh-login-alert ]] && grep -q ssh-login-alert /etc/pam.d/sshd 2>/dev/null; } && echo "enabled (pam_exec → Telegram)" || echo "not configured")
 Wasabi S3 creds   : $([[ -f /root/.aws/credentials ]] && echo "/root/.aws/credentials" || echo "not configured")
 Wasabi bucket     : $({ [[ -f /etc/profile.d/wasabi.sh ]] && grep WASABI_BUCKET /etc/profile.d/wasabi.sh | cut -d= -f2; } || echo "n/a")
 Wasabi auto-backup: $([[ -f /etc/cron.daily/wasabi-autobackup ]] && echo "daily (/etc/cron.daily/wasabi-autobackup)" || echo "not configured")
