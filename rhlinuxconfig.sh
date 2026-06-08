@@ -2414,6 +2414,30 @@ _ntp_active() {
      || systemctl is-active --quiet systemd-timesyncd 2>/dev/null
 }
 
+# Send the detailed summary report to Telegram (as a document, so it isn't
+# truncated by the 4096-char message limit). No-op unless telegram-notify is
+# configured with a usable token + chat ID.
+_telegram_send_summary() {
+    command -v telegram-notify &>/dev/null || return 0
+    [[ -f "$SUMMARY_FILE" ]] || return 0
+    local token chat host caption
+    token=$(awk -F'"' '/^TOKEN=/{print $2; exit}' /usr/local/bin/telegram-notify 2>/dev/null)
+    chat=$(awk -F'"'  '/^CHAT=/{print $2; exit}'  /usr/local/bin/telegram-notify 2>/dev/null)
+    [[ -n "$token" && -n "$chat" ]] || return 0
+    host="$(hostname -f 2>/dev/null || hostname)"
+    caption="✅ RHLinuxConfig complete on ${host} — OK:${SUM_OK:-?} FAIL:${SUM_FAIL:-?} SKIP:${SUM_SKIP:-?}"
+    info "Sending install summary to Telegram..."
+    if curl -s --max-time 30 \
+        -F chat_id="${chat}" \
+        -F caption="${caption}" \
+        -F document=@"${SUMMARY_FILE}" \
+        "https://api.telegram.org/bot${token}/sendDocument" -o /dev/null; then
+        log "Install summary sent to Telegram."
+    else
+        warn "Could not send install summary to Telegram."
+    fi
+}
+
 show_summary() {
     echo
     header "Setup Complete"
@@ -2647,6 +2671,9 @@ HEADER
     } > "$SUMMARY_FILE"
 
     chmod 644 "$SUMMARY_FILE" "$LOGFILE" 2>/dev/null || true
+
+    # Ship the full report to Telegram if it's configured (all run modes).
+    _telegram_send_summary
 }
 
 # ── Global progress bar ─────────────────────────────────────────────────────
