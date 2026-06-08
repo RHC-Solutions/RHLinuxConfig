@@ -252,4 +252,4 @@ Logs:
 
 ## License
 
-MIT.
+[MIT](LICENSE) © 2026 RHC Solutions
