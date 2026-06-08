@@ -97,20 +97,22 @@ Detection falls back to `ID_LIKE` for unknown derivatives. All package names, ne
 | 9 | **Latest Node / Git / Python** | Node LTS via NodeSource · Git via `ppa:git-core/ppa` on Debian · Python via deadsnakes/EPEL. |
 | 10 | **opencode** | `npm i -g @opencode-ai/opencode` + PATH in `/etc/profile.d/opencode.sh`. |
 | 11 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` + PATH in `/etc/profile.d/claude-code.sh`. |
-| 12 | **Node + global modules refresh** | Bumps `npm` itself, then runs `npm update -g` so every globally installed package (opencode, claude-code, anything else) is at its latest semver. Prints the before/after `npm list -g --depth=0` so you can see what moved. |
+| 12 | **Codex CLI** | `npm i -g @openai/codex` (OpenAI Codex CLI, binary `codex`). |
+| 13 | **Gemini CLI** | `npm i -g @google/gemini-cli` (Google Gemini CLI, binary `gemini`). |
+| 14 | **Node + global modules refresh** | Bumps `npm` itself, then runs `npm update -g` so every globally installed package (opencode, claude-code, codex, gemini-cli, anything else) is at its latest semver. Prints the before/after `npm list -g --depth=0` so you can see what moved. |
 
 ### Interactive wizards (full mode only)
 | # | Step | Detail |
 |---|------|--------|
-| 13 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
-| 14 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
-| 15 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
-| 16 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
-| 17 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
-| 18 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
-| 19 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
-| 20 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
-| 21 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
+| 15 | **Static IP** | netplan / `/etc/network/interfaces` / ifcfg / systemd-networkd depending on distro |
+| 16 | **Root lockdown** | Generates new root password, sets `PermitRootLogin no`, restarts sshd |
+| 17 | **`odin` user** | Sudo-enabled admin (`NOPASSWD`), generated password, copies root's `authorized_keys` |
+| 18 | **Telegram** | Bot token + chat ID → `/usr/local/bin/telegram-notify` |
+| 19 | **Wasabi S3** | Creds in `~/.aws/credentials`, validates bucket, installs `wasabi-backup` |
+| 20 | **Daily auto-backup** | `cron.daily` sync of `/home /etc /root /var/log /var/www` to Wasabi |
+| 21 | **Cloudflare DDNS** | API token + zone + record → `cloudflare-dns` script + hourly cron |
+| 22 | **Firewall** | UFW or firewalld — deny incoming, allow SSH, prompts for 80/443 |
+| 23 | **Fail2Ban** | SSH + SSH-DDoS + firewall jails, optional AbuseIPDB reporting |
 
 ---
 

@@ -5,7 +5,7 @@
 #           Arch, Manjaro, openSUSE, SLES
 # - System info, updates, base + extended toolkit, network test tools
 # - tmux defaults (/etc/tmux.conf), glances, Midnight Commander
-# - Latest Node / Git / Python, opencode, Claude Code
+# - Latest Node / Git / Python, opencode, Claude Code, Codex CLI, Gemini CLI
 # - Refreshes npm + all globally installed npm packages each run
 # - Telegram alerts, Wasabi backup, Cloudflare DDNS
 # - UFW / firewalld + Fail2Ban + AbuseIPDB
@@ -1186,9 +1186,51 @@ EOF
     log "Claude Code PATH configured."
 }
 
+# ── 6.1 Install Codex CLI ───────────────────────────────────────────────────
+do_install_codex() {
+    header "Installing Codex CLI"
+    if command -v codex &>/dev/null; then
+        log "Codex CLI already installed: $(codex --version 2>/dev/null || echo 'present')"
+        return
+    fi
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found — skipping Codex CLI."
+        return
+    fi
+    info "Installing @openai/codex globally via npm..."
+    npm install -g @openai/codex 2>&1 | tail -3 || {
+        warn "Codex CLI npm install failed — check network / npm permissions."
+        return
+    }
+    command -v codex &>/dev/null \
+        && log "Codex CLI installed: $(codex --version 2>/dev/null || echo 'ok')" \
+        || warn "codex binary not found after install."
+}
+
+# ── 6.2 Install Gemini CLI ──────────────────────────────────────────────────
+do_install_gemini() {
+    header "Installing Gemini CLI"
+    if command -v gemini &>/dev/null; then
+        log "Gemini CLI already installed: $(gemini --version 2>/dev/null || echo 'present')"
+        return
+    fi
+    if ! command -v npm &>/dev/null; then
+        warn "npm not found — skipping Gemini CLI."
+        return
+    fi
+    info "Installing @google/gemini-cli globally via npm..."
+    npm install -g @google/gemini-cli 2>&1 | tail -3 || {
+        warn "Gemini CLI npm install failed — check network / npm permissions."
+        return
+    }
+    command -v gemini &>/dev/null \
+        && log "Gemini CLI installed: $(gemini --version 2>/dev/null || echo 'ok')" \
+        || warn "gemini binary not found after install."
+}
+
 # ── 6.5 Check & Update Node + global npm modules ──────────────────────────
 # Runs after the Node-LTS install path (do_install_latest) and the global
-# tool installers (opencode, claude-code). `npm update -g` refreshes every
+# tool installers (opencode, claude-code, codex, gemini-cli). `npm update -g` refreshes every
 # globally-installed package to its latest matching semver; `npm doctor`
 # surfaces any registry/perm issues that would silently break later runs.
 do_update_node() {
@@ -2072,6 +2114,8 @@ show_summary() {
     else
         sum_fail "Claude Code" "install failed"
     fi
+    command -v codex  &>/dev/null && sum_pass "Codex CLI"  "$(codex --version 2>/dev/null | head -1)"  || sum_fail "Codex CLI"  "install failed"
+    command -v gemini &>/dev/null && sum_pass "Gemini CLI" "$(gemini --version 2>/dev/null | head -1)" || sum_fail "Gemini CLI" "install failed"
 
     echo
     echo -e "${MAG}── Network test tools ──${NC}"
@@ -2186,6 +2230,8 @@ Git               : $(_v_or git --version | awk '{print $3}')
 Python 3          : $(_v_or python3 --version | awk '{print $2}')
 opencode          : $(if command -v opencode &>/dev/null; then opencode --version 2>/dev/null | head -1; elif [[ -x /root/.opencode/bin/opencode ]]; then /root/.opencode/bin/opencode --version 2>/dev/null | head -1; else echo "not installed"; fi)
 Claude Code       : $(_v_or claude --version | head -1)
+Codex CLI         : $(_v_or codex --version | head -1)
+Gemini CLI        : $(_v_or gemini --version | head -1)
 Ookla speedtest   : $(if command -v speedtest &>/dev/null && speedtest --version 2>/dev/null | grep -qi 'Speedtest by Ookla'; then speedtest --version | head -1; else echo "not installed"; fi)
 netperf           : $(_check "" command -v netperf | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
 iperf3            : $(_check "" command -v iperf3 | sed 's/.* /  /;s/^  /installed: /;s/installed: yes/yes/;s/installed: no/no/')
@@ -2286,6 +2332,8 @@ declare -A STEP_LABELS=(
     [do_install_latest]="Node / Git / Python"
     [do_install_opencode]="opencode"
     [do_install_claude]="Claude Code"
+    [do_install_codex]="Codex CLI"
+    [do_install_gemini]="Gemini CLI"
     [do_update_node]="Node + global modules"
     [wizard_static_ip]="Static IP"
     [wizard_root]="Root lockdown"
@@ -2366,7 +2414,7 @@ if [[ $# -eq 1 && "$1" == "--unattended" ]]; then
     header "UNATTENDED MODE"
     run_steps do_update do_install do_install_mc do_install_tmux \
               do_install_extras do_install_nettest do_install_latest \
-              do_install_opencode do_install_claude do_update_node \
+              do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
               setup_firewall setup_fail2ban
     show_summary
     auto_reboot
@@ -2385,7 +2433,7 @@ echo
 
 run_steps do_update do_install do_install_mc do_install_tmux \
           do_install_extras do_install_nettest do_install_latest \
-          do_install_opencode do_install_claude do_update_node \
+          do_install_opencode do_install_claude do_install_codex do_install_gemini do_update_node \
           wizard_static_ip wizard_root wizard_odin_user \
           setup_telegram setup_wasabi setup_wasabi_autobackup setup_cloudflare \
           setup_firewall setup_fail2ban post_notify
